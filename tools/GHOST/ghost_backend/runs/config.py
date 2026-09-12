@@ -54,6 +54,10 @@ def validate_settings(settings, allowed_keys):
             from ghost_backend.execution.options import validate_options
             value = validate_options(value)
             valid = True
+        elif key == 'BOR_EXECUTION_OPTIONS':
+            from ghost_backend.bor.options import validate_options
+            value = validate_options(value)
+            valid = True
         elif key in POSITIVE_INTS | OPTIONAL_INTS:
             valid = (value is None and key in OPTIONAL_INTS) or (type(value) is int and value >= 1)
         elif key in TEXT | OPTIONAL_TEXT:
@@ -97,12 +101,20 @@ def validate_settings(settings, allowed_keys):
         result[key] = value
     if result.get('SOLVER_METHOD') == 'experimental_cpu' and result.get('LU_PRECISION', 'double') != 'double':
         raise ValueError('Experimental CPU requires double LU precision.')
+    if (result.get('BOR_EXECUTION_OPTIONS', {}).get('factorization') == 'compressed'
+            and result.get('TABLE_PRECISION') == 'single'):
+        raise ValueError('Compressed BOR assembly requires double precision.')
     return result
 
 
 def settings_from_run_setup(value, kind):
-    """Reuse the desktop 2-D recipe for the monostatic driver capabilities."""
+    """Reuse a matching desktop recipe for the monostatic driver capabilities."""
     from ghost_backend.runs.setup import DEFAULT_QUALITY, validate_setup
+    if isinstance(value, dict) and value.get('schema') == 'grim.bor-run-setup':
+        if kind != 'bor':
+            raise ValueError('A BOR run setup cannot configure a 2-D driver.')
+        from ghost_backend.runs.bor_setup import driver_settings
+        return driver_settings(value)
     if kind != '2d':
         raise ValueError('A 2-D run setup cannot configure a BoR driver.')
     setup = validate_setup(value)

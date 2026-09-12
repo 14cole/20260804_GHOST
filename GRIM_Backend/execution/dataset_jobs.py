@@ -11,7 +11,9 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PySide6.QtCore import QObject, QThread, Signal
 from GRIM_Backend.datasets.grid import RcsGrid
-from GRIM_Backend.io.loaders import is_supported_path, load_dataset as load_dataset_headless
+from GRIM_Backend.io.loaders import (
+    UnrecognizedTableError, is_supported_path, load_dataset as load_dataset_headless,
+)
 from GRIM_Backend.io.batch import _stage_and_publish_csv_batch
 
 
@@ -67,7 +69,7 @@ _LOADER_UNKNOWN_MEMORY_BUDGET_BYTES = 512 * 1024**2
 
 _GRIM_LOAD_PEAK_FACTOR = 3.5
 
-_TEXT_LOADER_EXTENSIONS = (".csv", ".txt", ".cst_data", ".out", ".ss")
+_TEXT_LOADER_EXTENSIONS = (".csv", ".txt", ".dat", ".asc", ".ascii", ".tsv", ".cst_data", ".out", ".ss")
 
 def _grim_archive_uncompressed_bytes(path: str) -> int | None:
     """Return declared uncompressed NPZ bytes without extracting the archive."""
@@ -110,7 +112,7 @@ def _dataset_load_memory_estimate(path: str) -> tuple[int, int]:
     # output arrays, and duplicate-validation state concurrently. Real SENTRi
     # imports have measured around 77x their file size at peak, so the old 4x
     # rule was unsafe by more than an order of magnitude.
-    if lower.endswith((".csv", ".txt")):
+    if lower.endswith((".csv", ".txt", ".dat", ".asc", ".ascii", ".tsv")):
         retained = max(stored_bytes, 16 * stored_bytes)
         peak = max(_LOADER_MIN_WORKING_BYTES, 96 * stored_bytes)
         return retained, peak
@@ -204,7 +206,7 @@ def _load_dataset_path_task(task: tuple[int, str]) -> dict[str, object]:
         history = str(getattr(dataset, "history", "") or path)
     except Exception as exc:
         return {
-            "status": "error",
+            "status": "mapping_required" if isinstance(exc, UnrecognizedTableError) else "error",
             "index": index,
             "path": path,
             "file_name": file_name,
@@ -253,12 +255,17 @@ class _DatasetLoadWorker(QObject):
     def run(self) -> None:
         total = len(self._tasks)
         loaded: list[dict[str, object]] = []
+        mapping_required: list[dict[str, object]] = []
         failed: list[str] = []
         used_parallel = False
 
         def _consume(result: dict[str, object], done_count: int) -> None:
             status = str(result.get("status", "error"))
             file_name = str(result.get("file_name", "dataset"))
+            if status == "mapping_required":
+                mapping_required.append(result)
+                self.progress.emit(done_count, total, f"Column labels needed: {file_name}")
+                return
             if status == "ok":
                 loaded.append(result)
                 self.progress.emit(done_count, total, f"Loaded {file_name}")
@@ -292,6 +299,7 @@ class _DatasetLoadWorker(QObject):
             self.finished.emit(
                 {
                     "loaded": loaded,
+                    "mapping_required": sorted(mapping_required, key=lambda item: int(item["index"])),
                     "failed": failed,
                     "ignored": self._ignored_count,
                     "used_parallel": used_parallel,

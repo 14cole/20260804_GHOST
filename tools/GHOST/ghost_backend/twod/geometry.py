@@ -1120,22 +1120,21 @@ def validate_geometry_snapshot_for_solver(
     snap_tol_m = 1.0e-9
     crack_floor_m = 1.0e-12
     endpoint_list = sorted(set(all_points))
-    for i in range(len(endpoint_list)):
+    from ghost_backend.geometry.spatial import overlapping_pairs
+    endpoint_bounds = [(x, x, y, y) for x, y in endpoint_list]
+    for i, j in overlapping_pairs(endpoint_bounds, tol):
         px, py = endpoint_list[i]
-        j = i + 1
-        while j < len(endpoint_list) and endpoint_list[j][0] - px <= tol:
-            qx, qy = endpoint_list[j]
-            j += 1
-            gap = math.hypot(qx - px, qy - py)
-            if gap > tol or gap <= crack_floor_m:
-                continue
-            if gap > snap_tol_m:
-                raise ValueError(
-                    f"Geometry crack: endpoints ({px:.9g}, {py:.9g}) m and ({qx:.9g}, {qy:.9g}) m "
-                    f"are {gap:.3g} m apart -- close enough to look connected, but "
-                    "beyond the 1e-9 m mesh node-snap tolerance, so they would mesh as an OPEN "
-                    "gap. Make the endpoints exactly coincident (or separate them intentionally)."
-                )
+        qx, qy = endpoint_list[j]
+        gap = math.hypot(qx - px, qy - py)
+        if gap > tol or gap <= crack_floor_m:
+            continue
+        if gap > snap_tol_m:
+            raise ValueError(
+                f"Geometry crack: endpoints ({px:.9g}, {py:.9g}) m and ({qx:.9g}, {qy:.9g}) m "
+                f"are {gap:.3g} m apart -- close enough to look connected, but "
+                "beyond the 1e-9 m mesh node-snap tolerance, so they would mesh as an OPEN "
+                "gap. Make the endpoints exactly coincident (or separate them intentionally)."
+            )
 
 
     primitive_bounds = []
@@ -1146,33 +1145,7 @@ def validate_geometry_snapshot_for_solver(
             min(float(p1[1]), float(p2[1])),
             max(float(p1[1]), float(p2[1])),
         ))
-    use_x_axis = (max(xs) - min(xs)) >= (max(ys) - min(ys))
-    primary_min = 0 if use_x_axis else 2
-    primary_max = 1 if use_x_axis else 3
-    secondary_min = 2 if use_x_axis else 0
-    secondary_max = 3 if use_x_axis else 1
-    sweep_order = sorted(
-        range(len(primitives)),
-        key=lambda idx: (primitive_bounds[idx][primary_min], idx),
-    )
-    candidate_pairs: 'List[Tuple[int, int]]' = []
-    for sweep_pos, raw_i in enumerate(sweep_order):
-        bounds_i = primitive_bounds[raw_i]
-        for later_pos in range(sweep_pos + 1, len(sweep_order)):
-            raw_j = sweep_order[later_pos]
-            bounds_j = primitive_bounds[raw_j]
-            if bounds_j[primary_min] > bounds_i[primary_max] + tol:
-                break
-            if (
-                bounds_j[secondary_min] > bounds_i[secondary_max] + tol
-                or bounds_i[secondary_min] > bounds_j[secondary_max] + tol
-            ):
-                continue
-            candidate_pairs.append(
-                (raw_i, raw_j) if raw_i < raw_j else (raw_j, raw_i)
-            )
-
-    for i, j in sorted(candidate_pairs):
+    for i, j in overlapping_pairs(primitive_bounds, tol):
         seg_i, prim_i, name_i, a1, a2 = primitives[i]
         seg_j, prim_j, name_j, b1, b2 = primitives[j]
 
@@ -1247,6 +1220,7 @@ def _build_panels(
     meters_scale: 'float',
     min_wavelength: 'float',
     max_panels: 'int' = MAX_PANELS_DEFAULT,
+    segment_wavelengths=None,
 ) -> 'List[Panel]':
     """
     Discretize all geometry primitives into oriented boundary elements.
@@ -1275,7 +1249,11 @@ def _build_panels(
             "the geometry segment count."
         )
 
+    if segment_wavelengths is not None:
+        if len(segment_wavelengths) != len(segments) or any(not math.isfinite(v) or v < min_wavelength for v in segment_wavelengths):
+            raise ValueError('Invalid local material mesh wavelengths.')
     for seg_idx, seg in enumerate(segments):
+        wavelength = min_wavelength if segment_wavelengths is None else segment_wavelengths[seg_idx]
         props = list(seg.get("properties", []) or [])
 
 
@@ -1315,7 +1293,7 @@ def _build_panels(
 
                 base_n_prop = _parse_int(base_segment_n[seg_idx], 0)
                 base_count = _panel_count_from_n(
-                    base_n_prop, prim_len, min_wavelength
+                    base_n_prop, prim_len, wavelength
                 )
                 count = max(
                     base_count + 1,
@@ -1323,7 +1301,7 @@ def _build_panels(
                 )
             else:
                 count = _panel_count_from_n(
-                    n_prop, prim_len, min_wavelength
+                    n_prop, prim_len, wavelength
                 )
             if n_prop > 0 and min_wavelength > EPS:
                 minimum_count = max(

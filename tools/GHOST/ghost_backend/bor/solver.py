@@ -6,11 +6,11 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
-from ghost_backend.execution.metrics import active_metrics, profiled_solve, timed_stage
+from ghost_backend.execution.metrics import active_metrics, profiled_solve, timed_stage, metrics_scope
 from scipy import special as sp
 from scipy.linalg import get_lapack_funcs
 from scipy.spatial import cKDTree
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, lil_matrix, issparse, block_diag, bmat, diags
 
 from ghost_backend.bor.kernels import (
     C0,
@@ -33,6 +33,12 @@ from ghost_backend.bor.kernels import (
 from ghost_backend.twod.solver import _memory_gate_message, _solve_memory_limit_gb
 
 
+from ghost_backend.bor.options import configured, current_options, bounded_rhs_count, compressed_requested, option_scope, current_checkpoint
+
+
+from ghost_backend.bor.tiled import TileExpression, primitive, mass_expression, modal_matrix, modal_block
+
+
 BOR_LINEAR_RESIDUAL_MAX = 1.0e-8
 BOR_LINEAR_BACKWARD_ERROR_MAX = 1.0e-12
 BOR_CONDITION_EST_MAX = 1.0e12
@@ -48,6 +54,8 @@ _COMPLEX128_BYTES = np.dtype(np.complex128).itemsize
 
 def _reduce_constrained_operator(matrix, transform):
     """Apply sparse pole/junction relations without dense cubic products."""
+    if isinstance(matrix, TileExpression):
+        return matrix.reduce(transform)
     q = csr_matrix(transform)
     return q.conj().T @ (q.T @ matrix.T).T
 
@@ -91,12 +99,27 @@ def estimate_bor_dense_peak_gb(
             raise ValueError("BoR mode-task count must be a positive integer.")
         active_workers = min(worker_count, task_count)
 
+    if compressed_requested():
+        from ghost_backend.compressed.memory import inverse_storage
+        options = current_options()
+        budget = options['compressed_storage_mib'] * 1024**2 / active_workers
+        retained_inverse, inverse_peak = inverse_storage(dofs)
+        operator_ceiling = 16*dofs*dofs + 128*dofs
+        payload = min(budget, operator_ceiling + retained_inverse)
+        rhs_workspace = 24 * dofs * bounded_rhs_count(rhs_count) * _COMPLEX128_BYTES
+        # Numeric payload is capped; construction/FFT/RHS workspaces are additional.
+        peak = max(payload + FFT_BUILD_BUDGET + 32*1024**2,
+                   min(operator_ceiling, budget) + inverse_peak,
+                   payload + rhs_workspace)
+        return (active_workers * peak + options['tile_cache_mib'] * 1024**2) / 1.e9
+
     matrix_bytes = (
         BOR_DENSE_MATRIX_EQUIVALENTS
         * dofs
         * dofs
         * _COMPLEX128_BYTES
     )
+    rhs_count = bounded_rhs_count(rhs_count)
     rhs_bytes = (
         BOR_DENSE_RHS_EQUIVALENTS
         * dofs
@@ -407,6 +430,8 @@ class BorPecSolver:
         freq_hz = float(freq_hz)
         if (not math.isfinite(freq_hz)) or freq_hz <= 0.0:
             raise ValueError("BoR frequency must be a positive finite value.")
+        self._compressed = compressed_requested()
+        self._checkpoint = current_checkpoint()
         self._table_dtype = np.complex64 if single_tables else np.complex128
         self.gen = Generatrix(np.asarray(points, dtype=float))
         k0 = 2.0 * math.pi * freq_hz / C0
@@ -776,6 +801,8 @@ class BorPecSolver:
 
 
     def assemble_mode(self, m: 'int', m_max: 'int') -> 'np.ndarray':
+        if self._compressed:
+            return primitive(self, 'T', m, m_max)
         k = self.k
         g = self.g
         if self._stream is not None:
@@ -880,6 +907,9 @@ class BorPecSolver:
         """2pi * Int w(t) rho T_i T_j dt  (node-based [Nn, Nn]); weight is a
         per-Gauss-point array (default 1) -- used for the MFIE J/2 term and
         the IBC Z_s term (with weight = Z_s at the Gauss points)."""
+        if self._compressed:
+            return mass_expression(self, weight)
+
 
         if weight is None and self._mass_cache is not None:
             return self._mass_cache
@@ -915,6 +945,9 @@ class BorPecSolver:
     def assemble_mfie_mode(self, m: 'int', m_max: 'int') -> 'np.ndarray':
         """Z_MFIE = (1/2) M - K  (node-based [2Nn, 2Nn]), where K is the
         Galerkin contraction of the modal MFIE brackets."""
+        if self._compressed:
+            return primitive(self, 'K', m, m_max)
+
 
         g = self.g
         if self._stream is not None and self._stream.K is not None:
@@ -1109,6 +1142,9 @@ class BorPecSolver:
 
         The K' term applies Z_s at the SOURCE point.
         """
+        if self._compressed:
+            return primitive(self, 'IBC', m, m_max, zs_pt, zs_elem)
+
 
         ktt, ktf, kft, kff = self._rot_pv_blocks(m, m_max, zs_pt, zs_elem)
         Nn = self.Nn
@@ -1133,6 +1169,9 @@ class BorPecSolver:
         P[:, Mphi] = +B[:, f_t].  The same bilinear form gives the H-side
         operator: <W, H_PV(J)> = -(P J).
         """
+        if self._compressed:
+            return primitive(self, 'P', m, m_max)
+
 
         Btt, Btf, Bft, Bff = self._rot_pv_blocks(m, m_max)
         Nn = self.Nn
@@ -1161,6 +1200,8 @@ class BorPecSolver:
         rows, cols, sources = (np.empty(count, dtype=np.intp) for _ in range(3))
         values = np.empty((4, 2 * m_max + 1, count), complex)
         for pi, (e, f) in enumerate(pairs):
+            if self._checkpoint is not None:
+                self._checkpoint()
             sl = slice(4 * pi, 4 * pi + 4)
             rows[sl] = (e, e, e + 1, e + 1)
             cols[sl] = (f, f + 1, f, f + 1)
@@ -1197,6 +1238,11 @@ class BorPecSolver:
             for e, sources in enumerate(self._near_sources_by_element)
             for f in sources
         ]
+        if self._compressed:
+            for kind, enabled in (('efie', efie), ('mfie', mfie), ('ibc', ibc)):
+                if enabled:
+                    self._prepare_near_contractions(kind, pairs, m_max)
+            return
         streaming = self._stream is not None
         if not streaming and (efie or mfie or ibc):
 
@@ -1254,7 +1300,8 @@ class BorPecSolver:
             return cached
         mask = self.basis_mask(m)
         active_rows = np.flatnonzero(mask)
-        Q = np.zeros((2 * self.Nn, active_rows.size), dtype=np.complex128)
+        Q = (lil_matrix((2 * self.Nn, active_rows.size), dtype=complex) if self._compressed
+             else np.zeros((2 * self.Nn, active_rows.size), dtype=complex))
         Q[active_rows, np.arange(active_rows.size)] = 1.0
         if abs(int(m)) == 1:
             reduced_column = np.full(2 * self.Nn, -1, dtype=int)
@@ -1267,7 +1314,10 @@ class BorPecSolver:
                     continue
                 radial_sign = 1.0 if self.gen.trho[element] >= 0.0 else -1.0
                 Q[self.Nn + end, column] = 1j * int(m) * radial_sign
-        Q.setflags(write=False)
+        if issparse(Q):
+            Q = Q.tocsr()
+        else:
+            Q.setflags(write=False)
         self._basis_transform_cache[key] = Q
         return Q
 
@@ -1525,9 +1575,9 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
     by the junction solver, whose constraint reduction A_red = Q^T A Q is
     not expressible as a boolean mask).
 
-    Each mode's system is factored ONCE: every (theta, pol) is a stacked RHS
-    column of a single np.linalg.solve -- an aspect sweep at fixed frequency
-    costs one assembly + one LU per mode.  Modes are independent, so waves of
+    Each mode's system is factored ONCE and reused across bounded aspect
+    batches. Every recovered physical RHS retains its residual check; an
+    incident basis is retained only for the lifetime of that mode's factor.  Modes are independent, so waves of
     `workers` modes run on threads (BLAS releases the GIL); call prepare
     first so kernel/near caches are read-only during the parallel section.
     Accumulation and the 2-quiet-modes truncation test remain in strict mode
@@ -1559,7 +1609,7 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
     workers = max(1, int(workers))
     _guard_bor_dense_memory(
         n_dofs,
-        len(thetas) * len(pols),
+        min(len(thetas), current_options()['angle_batch_size']) * len(pols),
         workers,
         max(1, int(m_max) + 1),
         assembly_peak_gb=assembly_peak_gb,
@@ -1569,313 +1619,105 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
         prepare(m_max)
     min_mode_before_tail = max(0, int(min_mode_before_tail))
 
-    def linear_error_metrics(A, X, B):
-        """Return residual matrix, RHS-relative residual, and backward error.
+    from ghost_backend.bor.factor import ModalFactor, compressed_factor
+    from ghost_backend.linalg.sweep import SweepBasis, solve as solve_sweep
+    from scipy.sparse import issparse
+    options = current_options()
+    batch_size = options['angle_batch_size']
+    from ghost_backend.bor.cache import current_cache, cache_scope
+    tile_cache = current_cache()
 
-        The last quantity is the standard normwise infinity-norm backward
-        error, evaluated independently for every RHS column:
-
-            ||r||_inf / (||A||_inf ||x||_inf + ||b||_inf).
-
-        Unlike ``||r|| / ||b||``, it remains meaningful when a scaled or
-        ill-conditioned system produces a large solution whose matrix-vector
-        product contains substantial cancellation.
-        """
-
-        residual_matrix = A @ X - B
-        residual_norms = np.asarray(
-            np.linalg.norm(residual_matrix, axis=0), dtype=float
-        )
-        rhs_norms = np.asarray(np.linalg.norm(B, axis=0), dtype=float)
-        rhs_denominators = np.where(rhs_norms > 0.0, rhs_norms, 1.0)
-        relative_residual = float(
-            np.max(residual_norms / rhs_denominators)
-        )
-
-        matrix_inf_norm = float(np.linalg.norm(A, ord=np.inf))
-        solution_inf_norms = np.asarray(
-            np.linalg.norm(X, ord=np.inf, axis=0), dtype=float
-        )
-        rhs_inf_norms = np.asarray(
-            np.linalg.norm(B, ord=np.inf, axis=0), dtype=float
-        )
-        residual_inf_norms = np.asarray(
-            np.linalg.norm(residual_matrix, ord=np.inf, axis=0), dtype=float
-        )
-        backward_denominators = (
-            matrix_inf_norm * solution_inf_norms + rhs_inf_norms
-        )
-        backward_by_column = np.full(
-            backward_denominators.shape, math.inf, dtype=float
-        )
-        np.divide(
-            residual_inf_norms,
-            backward_denominators,
-            out=backward_by_column,
-            where=backward_denominators > 0.0,
-        )
-        backward_by_column[
-            (backward_denominators <= 0.0) & (residual_inf_norms == 0.0)
-        ] = 0.0
-        backward_error = float(np.max(backward_by_column))
-        return (
-            residual_matrix,
-            relative_residual,
-            backward_error,
-            residual_norms,
-            rhs_norms,
-        )
-
-    def solve_am(am: 'int'):
+    def solve_am(am):
         dF = np.zeros_like(F)
-        res = 0.0
-        backward = 0.0
+        res = backward = cond = 0.0
         refinement_count = 0
-        cond = 0.0
-
-        def reduce_rhs(full_rhs, reduction):
-            if reduction is None:
-                return full_rhs
-            reduction_array = np.asarray(reduction)
-            if reduction_array.ndim == 1:
-                return full_rhs[reduction_array]
-            return reduction_array.conj().T @ full_rhs
-
-        def expand_solution(reduced_solution, reduction):
-            if reduction is None:
-                return reduced_solution
-            reduction_array = np.asarray(reduction)
-            if reduction_array.ndim == 1:
-                full_solution = np.zeros(
-                    n_dofs, dtype=np.complex128
-                )
-                full_solution[reduction_array] = reduced_solution
-                return full_solution
-            return reduction_array @ reduced_solution
-
-        signed_modes = (
-            [0]
-            if am == 0
-            else ([am] if signed_mode_symmetry else [am, -am])
-        )
+        events = []
+        signed_modes = [0] if am == 0 else ([am] if signed_mode_symmetry else [am, -am])
         for m in signed_modes:
+            if check_abort is not None:
+                check_abort()
             A, mask = assemble(m)
-            mode_condition = math.nan
-            if not np.all(np.isfinite(A)):
-                raise RuntimeError(
-                    f"BoR mode m={m} produced a non-finite system matrix; "
-                    "no field is returned."
-                )
-            if rhs_batch is not None:
-                full_B = np.asarray(rhs_batch(m, thetas, pols))
-                expected = (n_dofs, len(thetas) * len(pols))
-                if full_B.shape != expected:
-                    raise RuntimeError(
-                        f"BoR mode m={m} batch excitation has shape "
-                        f"{full_B.shape}, expected {expected}."
-                    )
-                B = reduce_rhs(full_B, mask)
-            else:
-                cols = [
-                    reduce_rhs(rhs(m, th, pol), mask)
-                    for th in thetas for pol in pols
-                ]
-                B = np.stack(cols, axis=1)
-            if not np.all(np.isfinite(B)):
-                raise RuntimeError(
-                    f"BoR mode m={m} produced a non-finite excitation; "
-                    "no field is returned."
-                )
-            if monitor_cond:
-
-
-                getrf, getrs, gecon = get_lapack_funcs(
-                    ("getrf", "getrs", "gecon"), (A,)
-                )
-                if metrics is not None:
-                    getrf = metrics.wrap("factorization", getrf)
-                    getrs = metrics.wrap("rhs_solve", getrs)
-                    gecon = metrics.wrap("condition_estimate", gecon)
-                lu, piv, factor_info = getrf(
-                    np.asarray(A, dtype=np.complex128).copy()
-                )
-                if factor_info != 0:
-                    raise RuntimeError(
-                        f"BoR mode m={m} LU factorization failed "
-                        f"(LAPACK info={factor_info}); no field is returned."
-                    )
-                X, solve_info = getrs(lu, piv, B)
-                if solve_info != 0:
-                    raise RuntimeError(
-                        f"BoR mode m={m} LU solve failed "
-                        f"(LAPACK info={solve_info}); no field is returned."
-                    )
-                matrix_one_norm = float(np.linalg.norm(A, ord=1))
-                if (
-                    not math.isfinite(matrix_one_norm)
-                    or matrix_one_norm <= 0.0
-                ):
-                    raise RuntimeError(
-                        f"BoR mode m={m} has an invalid matrix 1-norm; "
-                        "no field is returned."
-                    )
-                reciprocal_condition, cond_info = gecon(
-                    lu, matrix_one_norm
-                )
-                if (
-                    cond_info != 0
-                    or not math.isfinite(float(reciprocal_condition))
-                    or float(reciprocal_condition) <= 0.0
-                ):
-                    raise RuntimeError(
-                        f"BoR mode m={m} condition estimation failed "
-                        f"(LAPACK info={cond_info}); no field is returned."
-                    )
-                mode_condition = 1.0 / float(reciprocal_condition)
-                if (
-                    not math.isfinite(mode_condition)
-                    or mode_condition > BOR_CONDITION_EST_MAX
-                ):
-                    raise RuntimeError(
-                        f"BoR mode m={m} estimated 1-norm condition "
-                        f"{mode_condition:.6g} exceeds the release limit "
-                        f"{BOR_CONDITION_EST_MAX:.6g}; no field is returned."
-                    )
-                cond = max(cond, mode_condition)
-            else:
-                solve_linear = (
-                    metrics.wrap("factor_and_rhs_solve", np.linalg.solve)
-                    if metrics is not None else np.linalg.solve
-                )
-                X = solve_linear(A, B)
-            if not np.all(np.isfinite(X)):
-                raise RuntimeError(
-                    f"BoR mode m={m} produced a non-finite linear-system "
-                    "solution; no field is returned."
-                )
-            (
-                residual_matrix,
-                residual,
-                backward_error,
-                residual_norms,
-                rhs_norms,
-            ) = linear_error_metrics(A, X, B)
-
-
-            for _attempt in range(2):
-                if (
-                    residual <= BOR_LINEAR_RESIDUAL_MAX
-                    and backward_error <= BOR_LINEAR_BACKWARD_ERROR_MAX
-                ):
-                    break
-                if monitor_cond:
-                    correction, correction_info = getrs(
-                        lu, piv, -residual_matrix
-                    )
-                    if correction_info != 0:
-                        break
+            factor = (compressed_factor(A, m, monitor_cond, options, min(workers, m_max+1), check_abort)
+                      if isinstance(A, TileExpression) else ModalFactor(A, m, monitor_cond, check_abort))
+            basis = SweepBasis(min(256, batch_size * len(pols)))
+            reduction = None if mask is None else (mask if issparse(mask) else np.asarray(mask))
+            projected = reduction is not None and (issparse(reduction) or reduction.ndim == 2)
+            if projected:
+                reduction = csr_matrix(reduction)
+            for i0 in range(0, len(thetas), batch_size):
+                if check_abort is not None:
+                    check_abort()
+                i1 = min(i0 + batch_size, len(thetas))
+                angles = thetas[i0:i1]
+                if rhs_batch is not None:
+                    full_B = np.asarray(rhs_batch(m, angles, pols))
+                    expected = (n_dofs, len(angles) * len(pols))
+                    if full_B.shape != expected:
+                        raise RuntimeError('BoR mode m={} batch excitation has shape {}, expected {}.'.format(m, full_B.shape, expected))
+                    B = full_B if reduction is None else (reduction.conj().T @ full_B if projected else full_B[reduction])
+                    full_B = None
                 else:
-                    correction = np.linalg.solve(A, -residual_matrix)
-                if not np.all(np.isfinite(correction)):
-                    break
-                candidate = X + correction
-                candidate_metrics = linear_error_metrics(A, candidate, B)
-                candidate_residual = candidate_metrics[1]
-                candidate_backward = candidate_metrics[2]
-                if (
-                    candidate_residual >= residual
-                    and candidate_backward >= backward_error
-                ):
-                    break
-                X = candidate
-                (
-                    residual_matrix,
-                    residual,
-                    backward_error,
-                    residual_norms,
-                    rhs_norms,
-                ) = candidate_metrics
-                refinement_count += 1
-
-            if (
-                not np.all(np.isfinite(rhs_norms))
-                or not np.all(np.isfinite(residual_norms))
-                or not math.isfinite(backward_error)
-            ):
-                raise RuntimeError(
-                    f"BoR mode m={m} produced a non-finite linear-system "
-                    "residual; no field is returned."
-                )
-            if backward_error > BOR_LINEAR_BACKWARD_ERROR_MAX:
-                raise RuntimeError(
-                    f"BoR mode m={m} normwise linear backward error "
-                    f"{backward_error:.6g} exceeds the release limit "
-                    f"{BOR_LINEAR_BACKWARD_ERROR_MAX:.6g} "
-                    f"(RHS-relative residual {residual:.6g}, estimated "
-                    f"condition {mode_condition:.6g}); no field is returned."
-                )
-            res = max(res, residual)
-            backward = max(backward, backward_error)
-            if farfield_batch is not None:
-
-
-                angle_chunk = 64
-                for i0 in range(0, len(thetas), angle_chunk):
-                    i1 = min(i0 + angle_chunk, len(thetas))
-                    c0 = i0 * len(pols)
-                    c1 = i1 * len(pols)
-                    if mask is None:
-                        full_X = X[:, c0:c1]
-                    else:
-                        reduction_array = np.asarray(mask)
-                        if reduction_array.ndim == 1:
-                            full_X = np.zeros(
-                                (n_dofs, c1 - c0), dtype=np.complex128
-                            )
-                            full_X[reduction_array] = X[:, c0:c1]
+                    def column(theta, pol):
+                        value = rhs(m, theta, pol)
+                        return value if reduction is None else (reduction.conj().T @ value if projected else value[reduction])
+                    B = np.column_stack([column(th, pol) for th in angles for pol in pols])
+                X = solve_sweep(factor, B, basis, setting=options['rhs_compression'])
+                B = None
+                if farfield_batch is not None:
+                    # Bound expansion and angular quadrature independently of the solve batch.
+                    for j0 in range(0, len(angles), 64):
+                        if check_abort is not None:
+                            check_abort()
+                        j1 = min(j0 + 64, len(angles))
+                        columns = X[:, j0 * len(pols):j1 * len(pols)]
+                        if reduction is None:
+                            full_X = columns
+                        elif projected:
+                            full_X = reduction @ columns
                         else:
-                            full_X = reduction_array @ X[:, c0:c1]
-                    contributions = np.asarray(
-                        farfield_batch(
-                            m, full_X, thetas[i0:i1], pols
-                        )
-                    )
-                    expected = (len(pols), i1 - i0)
-                    if contributions.shape != expected:
-                        raise RuntimeError(
-                            f"BoR mode m={m} batch far field has shape "
-                            f"{contributions.shape}, expected {expected}."
-                        )
-                    if not np.all(np.isfinite(contributions)):
-                        raise RuntimeError(
-                            f"BoR mode m={m} produced a non-finite batch "
-                            "far-field contribution; no field is returned."
-                        )
-                    dF[:, i0:i1] += contributions
-            else:
-                ci = 0
-                for it, th in enumerate(thetas):
-                    for ip, pol in enumerate(pols):
-                        if mask is None:
-                            sol = X[:, ci]
-                        else:
-                            sol = expand_solution(X[:, ci], mask)
-                        ci += 1
-                        contribution = complex(farfield(m, sol, th, pol))
-                        if not (
-                            math.isfinite(contribution.real)
-                            and math.isfinite(contribution.imag)
-                        ):
-                            raise RuntimeError(
-                                f"BoR mode m={m} produced a non-finite far-field "
-                                f"contribution at aspect {float(th):g} deg, "
-                                f"polarization {pol}; no field is returned."
-                            )
-                        dF[ip, it] += contribution
+                            full_X = np.zeros((n_dofs, columns.shape[1]), complex)
+                            full_X[reduction] = columns
+                        contributions = np.asarray(farfield_batch(m, full_X, angles[j0:j1], pols))
+                        expected = (len(pols), j1-j0)
+                        if contributions.shape != expected or not np.all(np.isfinite(contributions)):
+                            raise RuntimeError('BoR mode m={} produced an invalid or non-finite batch far-field contribution.'.format(m))
+                        dF[:, i0+j0:i0+j1] += contributions
+                        full_X = columns = contributions = None
+                else:
+                    for it, th in enumerate(angles):
+                        for ip, pol in enumerate(pols):
+                            sol = X[:, it * len(pols) + ip]
+                            if projected:
+                                sol = reduction @ sol
+                            elif reduction is not None:
+                                full = np.zeros(n_dofs, complex)
+                                full[reduction] = sol
+                                sol = full
+                            contribution = complex(farfield(m, sol, th, pol))
+                            if not math.isfinite(contribution.real) or not math.isfinite(contribution.imag):
+                                raise RuntimeError('BoR mode m={} produced a non-finite far-field contribution.'.format(m))
+                            dF[ip, i0+it] += contribution
+                    sol = full = None
+                X = None
+            res = max(res, factor.event['max_relative_residual'])
+            backward = max(backward, factor.event['max_backward_error'])
+            refinement_count += factor.event['refinement_steps']
+            if monitor_cond:
+                cond = max(cond, factor.condition)
+            events.append(dict(factor.event, mode=int(m)))
+            # Release both factors and retained incident basis before assembling the next mode.
+            factor = basis = A = reduction = mask = None
         if signed_mode_symmetry and am > 0:
             dF *= 2.0
-        return dF, res, backward, refinement_count, cond
+        return dF, res, backward, refinement_count, cond, events
 
+    def scoped_solve_am(am):
+        with option_scope(options):
+            with metrics_scope(metrics):
+                with cache_scope(tile_cache):
+                    return solve_am(am)
+
+    mode_events = []
     modes_used = 0
     quiet = 0
     am = 0
@@ -1892,9 +1734,10 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
             if check_abort is not None:
                 check_abort()
             wave = list(range(am, min(am + workers, m_max + 1)))
-            for w_am, (dF, res, backward, refined, cond) in zip(
-                wave, ex.map(solve_am, wave)
+            for w_am, (dF, res, backward, refined, cond, events) in zip(
+                wave, ex.map(scoped_solve_am, wave)
             ):
+                mode_events.extend(events)
                 F += dF
                 if not np.all(np.isfinite(F)):
                     raise RuntimeError(
@@ -1950,6 +1793,7 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
             if progress is not None:
                 progress(modes_used, m_max)
     stats = {
+        "modal_execution": dict(options, systems=mode_events),
         "linear_residual": max_res,
         "linear_backward_error": max_backward_error,
         "linear_refinement_steps": int(refinement_steps),
@@ -1974,7 +1818,7 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
         ),
         "condition_est_computed": bool(monitor_cond),
         "condition_est_method": (
-            "lapack_gecon_1norm" if monitor_cond else None
+            ("compressed_original_1norm_onenormest" if options["factorization"] == "compressed" else "lapack_gecon_1norm") if monitor_cond else None
         ),
         "condition_est_limit": float(BOR_CONDITION_EST_MAX),
     }
@@ -2242,6 +2086,8 @@ def estimate_bor_operator_storage_gb(
         else:
             merged[key] = (solver, bool(efie), bool(mfie), bool(ibc))
 
+    compressed = compressed_requested()
+    streaming = streaming or compressed
     retained = 0.0
     build_workspace = 0.0
     signed_modes = 2 * modes + 1
@@ -2358,7 +2204,7 @@ def estimate_bor_operator_storage_gb(
         retained += (
             category_count
             * constraint_size
-            * constraint_size
+            * (6 if compressed else constraint_size)
             * _COMPLEX128_BYTES
         )
 
@@ -2558,6 +2404,8 @@ def _bor_mode_limits(k, rho_max: 'float', thetas,
 def _block_diagonal_transforms(*blocks: 'np.ndarray') -> 'np.ndarray':
     """Dense block diagonal used by the small number of BoR field families."""
 
+    if any(issparse(block) for block in blocks):
+        return block_diag(blocks, format='csr')
     rows = sum(int(block.shape[0]) for block in blocks)
     columns = sum(int(block.shape[1]) for block in blocks)
     out = np.zeros((rows, columns), dtype=np.complex128)
@@ -2590,6 +2438,7 @@ def _apply_regular_axis_rows(Q: 'np.ndarray', columns: 'np.ndarray',
 
 
 @profiled_solve
+@configured
 def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
               cfie_alpha: 'float' = 0.5, zs=None, n_modes: 'Optional[int]' = None,
               gauss_order: 'int' = 4, mode_tol: 'float' = 1e-6, workers: 'int' = 1,
@@ -2720,7 +2569,8 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
             m_max, ((solver, alpha > 0.0, alpha < 1.0,
                      zs_pt is not None and alpha > 0.0),), streaming=True)
         if use_streaming
-        else BOR_TABLE_BUILD_PEAK_FACTOR * est_held
+        else (estimate_bor_operator_storage_gb(m_max, ((solver, alpha > 0., alpha < 1., zs_pt is not None),), streaming=True)
+              if solver._compressed else BOR_TABLE_BUILD_PEAK_FACTOR * est_held)
     )
     table_note = (f"{'Streamed far blocks' if use_streaming else 'Far kernel tables'} "
                   f"stored in single precision ({est:.1f} GB; double would "
@@ -2752,7 +2602,7 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
 
 
                 N = solver.Nn
-                dual_ibc = np.block([[Z[N:, N:], -Z[N:, :N]],
+                dual_ibc = modal_block([[Z[N:, N:], -Z[N:, :N]],
                                      [-Z[:N, N:], Z[:N, :N]]])
                 dual_ibc *= complex(zs_elem[0]) / ETA0**2
             if sheet_mass is not None:
@@ -2868,6 +2718,7 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
 
 
 @profiled_solve
+@configured
 def solve_bor_dielectric(points, freq_hz: 'float', thetas_deg, eps_r: 'complex',
                          mu_r: 'complex' = 1.0, n_modes: 'Optional[int]' = None,
                          gauss_order: 'int' = 4, mode_tol: 'float' = 1e-6,
@@ -2993,11 +2844,12 @@ def solve_bor_dielectric(points, freq_hz: 'float', thetas_deg, eps_r: 'complex',
         T_e = se.assemble_mode(m, m_max)
         T_i = si.assemble_mode(m, m_max)
         P_sum = ETA0 * (se.assemble_pmchwt_P(m, m_max) + si.assemble_pmchwt_P(m, m_max))
-        A = np.empty((4 * Nn, 4 * Nn), dtype=np.complex128)
+        A = modal_matrix((4 * Nn, 4 * Nn), compressed_requested())
         A[: 2 * Nn, : 2 * Nn] = T_e + T_i
         A[: 2 * Nn, 2 * Nn:] = -P_sum
         A[2 * Nn:, : 2 * Nn] = P_sum
         A[2 * Nn:, 2 * Nn:] = T_e + eta_ratio2 * T_i
+        del T_e, T_i, P_sum
         if abs(int(m)) == 1:
             q_surface = se.basis_transform(m)
             Q = _block_diagonal_transforms(q_surface, q_surface)
@@ -3371,6 +3223,9 @@ class BorCrossOperators:
     def assemble_T(self, m: 'int', m_max: 'int') -> 'np.ndarray':
         """Cross EFIE operator [2Np, 2Nq] (same normalization as
         BorPecSolver.assemble_mode, C = j k eta 2pi of this medium)."""
+        if self.sp._compressed:
+            return primitive(self, 'T', m, m_max)
+
 
         k = self.k
         gp, gq = self.sp.g, self.sq.g
@@ -3402,6 +3257,9 @@ class BorCrossOperators:
 
     def assemble_P(self, m: 'int', m_max: 'int') -> 'np.ndarray':
         """Cross rotated-PV operator [2Np, 2Nq] (see assemble_pmchwt_P)."""
+        if self.sp._compressed:
+            return primitive(self, 'P', m, m_max)
+
 
         gp, gq = self.sp.g, self.sq.g
         if self._stream is not None:
@@ -3430,15 +3288,18 @@ class BorCrossOperators:
 
     def prepare(self, m_max: 'int') -> 'None':
         """Warm every table/near cache (see BorPecSolver.prepare_operators)."""
-        if self._stream is None:
+        if self._stream is None and not self.sp._compressed:
             self.sp._ensure_dense_point_matrices()
             self.sq._ensure_dense_point_matrices()
             self._tables(m_max)
         for e, f in self.near_pairs:
+            if self.sp._checkpoint is not None:
+                self.sp._checkpoint()
             self._near_data(e, f, m_max)
 
 
 @profiled_solve
+@configured
 def solve_bor_coated_pec(points_outer, points_core, freq_hz: 'float', thetas_deg,
                          eps_r: 'complex', mu_r: 'complex' = 1.0,
                          n_modes: 'Optional[int]' = None, gauss_order: 'int' = 4,
@@ -3616,7 +3477,7 @@ def solve_bor_coated_pec(points_outer, points_core, freq_hz: 'float', thetas_deg
         T_e = se.assemble_mode(m, m_max)
         T_Lo = sLo.assemble_mode(m, m_max)
         P_sum = ETA0 * (se.assemble_pmchwt_P(m, m_max) + sLo.assemble_pmchwt_P(m, m_max))
-        A = np.zeros((ntot, ntot), dtype=np.complex128)
+        A = modal_matrix((ntot, ntot), compressed_requested())
         A[iJ, iJ] = T_e + T_Lo
         A[iJ, iM] = -P_sum
         A[iJ, iC] = -Xoc.assemble_T(m, m_max)
@@ -3626,6 +3487,7 @@ def solve_bor_coated_pec(points_outer, points_core, freq_hz: 'float', thetas_deg
         A[iC, iJ] = Xco.assemble_T(m, m_max)
         A[iC, iM] = -ETA0 * Xco.assemble_P(m, m_max)
         A[iC, iC] = -sLc.assemble_mode(m, m_max)
+        del T_e, T_Lo, P_sum
         if abs(int(m)) == 1:
             q_outer = se.basis_transform(m)
             Q = _block_diagonal_transforms(
@@ -3727,6 +3589,7 @@ def solve_bor_coated_pec(points_outer, points_core, freq_hz: 'float', thetas_deg
 
 
 @profiled_solve
+@configured
 def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
                               freq_hz: 'float', thetas_deg, eps_r: 'complex',
                               mu_r: 'complex' = 1.0, bare_zs=None,
@@ -3827,9 +3690,12 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
             zn[0] = zs_arr[0]
             zn[-1] = zs_arr[-1]
             zn[1:-1] = 0.5 * (zs_arr[:-1] + zs_arr[1:])
-            S = np.zeros((2 * b.Nn, 2 * b.Nn), dtype=complex)
-            S[:b.Nn, b.Nn:] = np.diag(zn)
-            S[b.Nn:, :b.Nn] = -np.diag(zn)
+            if b._compressed:
+                S = bmat([[None, diags(zn)], [-diags(zn), None]], format='csr')
+            else:
+                S = np.zeros((2 * b.Nn, 2 * b.Nn), dtype=complex)
+                S[:b.Nn, b.Nn:] = np.diag(zn)
+                S[b.Nn:, :b.Nn] = -np.diag(zn)
             S_maps.append(S)
 
     nonzero_bare_zs = [
@@ -4038,7 +3904,7 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
             b_acts.append((tb, fb))
             assign(off_J1[bi], (tb, fb))
 
-        Q = np.zeros((n_full, red), dtype=np.complex128)
+        Q = lil_matrix((n_full, red), dtype=complex) if compressed_requested() else np.zeros((n_full, red), complex)
         active = col >= 0
         Q[np.flatnonzero(active), col[active]] = 1.0
         _apply_regular_axis_rows(Q, col, off_Jd, sd_e, m)
@@ -4060,11 +3926,12 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
             if master_f >= 0:
                 Q[off_J2 + N2 + cn, master_f] = -1.0
                 Q[off_J1[bi] + N1[bi] + bn, master_f] = 1.0
+        Q = Q.tocsr() if issparse(Q) else Q
         _Q_cache[category] = Q
         return Q
 
     def assemble(m):
-        A = np.zeros((n_full, n_full), dtype=np.complex128)
+        A = modal_matrix((n_full, n_full), compressed_requested())
         sl_Jd = slice(off_Jd, off_Jd + 2 * Nd)
         sl_M = slice(off_M, off_M + 2 * Nd)
         sl_J2 = slice(off_J2, off_J2 + 2 * N2)
@@ -4106,6 +3973,7 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
                     if S_maps[bj] is not None:
                         A[sl_b, sl_bj] += -X_11[(bi, bj)].assemble_P(m, m_max) @ S_maps[bj]
         Q = build_Q(m)
+        del T_e, T_L, P_sum
         return _reduce_constrained_operator(A, Q), None
 
     def rhs(m, th, pol):
@@ -4114,10 +3982,10 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
         V[off_M:off_M + 2 * Nd] = ETA0 * sd_e.rhs_h_mode(m, th, pol)
         for bi, b in enumerate(bares):
             V[off_J1[bi]:off_J1[bi] + 2 * N1[bi]] = b.rhs_mode(m, th, pol)
-        return build_Q(m).conj().T @ V
+        return csr_matrix(build_Q(m)).conj().T @ V
 
     def farfield(m, x_red, th, pol):
-        x = build_Q(m) @ x_red
+        x = csr_matrix(build_Q(m)) @ x_red
         fth, fph = sd_e.farfield_mode(m, x[off_Jd:off_Jd + 2 * Nd], th,
                                       msol=ETA0 * x[off_M:off_M + 2 * Nd])
         for bi, b in enumerate(bares):
@@ -4139,7 +4007,7 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
         X_d2, X_2d, *X_d1, *X_1d, *X_11.values()
     )
     impedance_map_gb = sum(
-        matrix.nbytes for matrix in S_maps if matrix is not None
+        (matrix.data.nbytes + matrix.indices.nbytes + matrix.indptr.nbytes if issparse(matrix) else matrix.nbytes) for matrix in S_maps if matrix is not None
     ) / 1.0e9
     plan = _plan_multisurface_assembly(
         m_max,
@@ -4190,7 +4058,8 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
         "formulation": "pmchwt-partial-coating",
         "eps_r": complex(eps_r),
         "mu_r": complex(mu_r),
-        "assembly": "streaming" if plan["use_streaming"] else "tables",
+        "assembly": ("compressed" if compressed_requested() else
+                     "streaming" if plan["use_streaming"] else "tables"),
         "table_precision": "single" if plan["use_single"] else "double",
         "stream_mode_block": plan["mode_block"],
         "stream_sweeps": (
@@ -4400,7 +4269,7 @@ class _MultiRegionBor:
             if self.off_M[si] is not None:
                 assign(self.off_M[si], si, True)
 
-        Q = np.zeros((self.n_full, red), dtype=np.complex128)
+        Q = lil_matrix((self.n_full, red), dtype=complex) if compressed_requested() else np.zeros((self.n_full, red), complex)
         active = col >= 0
         Q[np.flatnonzero(active), col[active]] = 1.0
         for si in range(self.n_surf):
@@ -4433,11 +4302,12 @@ class _MultiRegionBor:
                         Q[self.off_M[ss] + ns, mmt] = ct
                     if mmf >= 0:
                         Q[self.off_M[ss] + self.Nn[ss] + ns, mmf] = cf
+        Q = Q.tocsr() if issparse(Q) else Q
         self._Q_cache[category] = Q
         return Q
 
     def assemble(self, m: 'int', m_max: 'int'):
-        A = np.zeros((self.n_full, self.n_full), dtype=np.complex128)
+        A = modal_matrix((self.n_full, self.n_full), compressed_requested())
         for ri, reg in enumerate(self.regions):
             eta_r = self.solv[(reg["bounds"][0][0], ri)].eta
             eta2 = (ETA0 / eta_r) ** 2
@@ -4473,10 +4343,10 @@ class _MultiRegionBor:
             if self.off_M[si] is not None:
                 V[self.off_M[si]:self.off_M[si] + 2 * self.Nn[si]] = \
                     ETA0 * s.rhs_h_mode(m, th, pol)
-        return self.build_Q(m).conj().T @ V
+        return csr_matrix(self.build_Q(m)).conj().T @ V
 
     def farfield(self, m: 'int', x_red: 'np.ndarray', th: 'float', pol: 'str') -> 'complex':
-        x = self.build_Q(m) @ x_red
+        x = csr_matrix(self.build_Q(m)) @ x_red
         fth = fph = 0.0
         for (si, _) in self.regions[self.ext_region]["bounds"]:
             s = self.solv[(si, self.ext_region)]
@@ -4563,7 +4433,8 @@ def _solve_multiregion(sys_: '_MultiRegionBor', freq_hz, thetas_deg, n_modes,
         "n_unknowns": int(sys_.n_full),
         "n_junctions": len(sys_.junctions),
         "formulation": formulation,
-        "assembly": "streaming" if plan["use_streaming"] else "tables",
+        "assembly": ("compressed" if compressed_requested() else
+                     "streaming" if plan["use_streaming"] else "tables"),
         "table_precision": "single" if plan["use_single"] else "double",
         "stream_mode_block": plan["mode_block"],
         "stream_sweeps": (
@@ -4582,6 +4453,7 @@ def _solve_multiregion(sys_: '_MultiRegionBor', freq_hz, thetas_deg, n_modes,
 
 
 @profiled_solve
+@configured
 def solve_bor_coated2_pec(points_outer, points_mid, points_core,
                           freq_hz: 'float', thetas_deg,
                           eps_inner: 'complex', mu_inner: 'complex',
@@ -4618,6 +4490,7 @@ def solve_bor_coated2_pec(points_outer, points_mid, points_core,
 
 
 @profiled_solve
+@configured
 def solve_bor_coated_n_pec(interface_points, points_core, freq_hz: 'float',
                            thetas_deg, eps_list, mu_list,
                            n_modes: 'Optional[int]' = None, gauss_order: 'int' = 4,
@@ -4662,6 +4535,7 @@ def solve_bor_coated_n_pec(interface_points, points_core, freq_hz: 'float',
 
 
 @profiled_solve
+@configured
 def solve_bor_coating_patch(points_patch, points_mid_covered, points_mid_bare,
                             points_core, freq_hz: 'float', thetas_deg,
                             eps_inner: 'complex', mu_inner: 'complex',

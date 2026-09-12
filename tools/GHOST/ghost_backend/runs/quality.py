@@ -66,6 +66,17 @@ def solver_report_text(metadata):
     if (any(layers.values()) if isinstance(layers, dict) else bool(layers)):
         lines.append("Thin layer: first-order thickness approximation. Mesh certification does not certify its difference from bulk material.")
     lines.append("Linear backend: "+str(metadata.get("linear_backend", "see per-frequency details")))
+    selection = metadata.get('backend_selection')
+    if selection:
+        lines.append('Automatic backend: ' + str(selection['selected']) + '. ' + str(selection['reason']))
+    if 'mesh_strategy_used' in metadata:
+        lines.append('Mesh sizing: ' + str(metadata['mesh_strategy_used']))
+    if metadata.get('local_mesh_fallback'):
+        lines.append('Frequencies that failed the local mesh comparison passed after retrying global sizing.')
+    checkpoints = metadata.get('frequency_checkpoints')
+    if checkpoints:
+        lines.append('Completed frequency checkpoints: {}; reused: {}.'.format(checkpoints['completed'], checkpoints['reused']))
+        lines.append('Checkpoint directory: ' + str(checkpoints['directory']))
     if metadata.get("survey_mode"):
         lines.append("Survey: the mesh-refinement comparison was not run.")
     profile = metadata.get("runtime_profile", {})

@@ -9,19 +9,19 @@ resource limits, saved setups, and boundary-density/report tools. Frequency and
 azimuth inputs display either a list or a sweep, according to the selected mode.
 BoR uses aspect angles from +z in place of the 2D azimuth input.
 
-The GHOST solver tab and GRIM Runs workspace share the preset selector and
-advanced **2D execution and resources** controls. In Runs, Advanced Settings
-also contains cluster allocation and BoR body orientation. Save a **2D run setup**
-to carry the numerical settings between the workspaces.
-Geometry paths, output paths, and cluster connection settings remain separate.
+The GHOST preset selector and advanced **2D execution and resources** controls
+are captured by **Save run setup**. Restore a setup in GHOST or embed it as
+`run_setup` in a local/HPC driver JSON configuration. Geometry paths, output
+paths, and cluster allocation settings are configured separately.
 
 | Geometry preset | Kernel evaluation | Factorization | Sweep basis reuse |
 | --- | --- | --- | --- |
 | Small Geometry (No RAM Optimization) | Reference | Dense LU | Off |
 | Large Geometry (RAM Optimization), default | CPU streaming | Compressed assembly | Automatic |
 | Balanced | CPU streaming | Dense LU | Automatic |
+| Automatic (RAM-aware) | CPU streaming | Dense/compressed selected from mesh and RAM forecasts | Automatic |
 
-All three use double precision, up to four assembly threads and two BLAS threads,
+All four use double precision, up to four assembly threads and two BLAS threads,
 and 256 angles per batch. Large Geometry uses an 8192 MiB compressed payload
 allowance. Small Geometry disables optional compression; normal allocation
 checks and bounded solver workspaces still apply. Balanced retains a dense
@@ -57,6 +57,8 @@ Smaller batches trade time for a modest workspace reduction in that test.
 | Hierarchical factor (dense assembly) | Assembles a dense operator and compresses its factorization. |
 | Compressed assembly (low RAM) | Default for new 2D monostatic runs. Builds compressed tiles from geometry; requires CPU streaming kernels and double precision. |
 | Hierarchical with dense fallback | Can fall back to dense LU; unsuitable when a dense allocation cannot fit. |
+| RAM-aware dense / compressed | Forecasts both certification meshes; prefers dense with 20% extra admission headroom, otherwise compressed with its own admission checks. Saved value: `adaptive`. |
+| Mesh sizing | `global` by default; optional `local` material sizing protects nearby boundaries and geometric features. Certified local runs retry global sizing if mesh convergence fails. |
 | RAM budget per solve | Admission threshold for estimated total RAM, bounded by 90% of currently available memory. Available memory uses that bound alone. This does not enforce an OS memory limit. |
 | Compressed storage cap | Retained numeric operator/inverse payload, including partner-polarization reservations. Workspace and runtime RAM are additional. |
 | Assembly threads | Requested assembly concurrency, capped by a batch worker's allocation. Auto uses the batch scheduler; desktop Auto uses one thread. |

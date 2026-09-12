@@ -23,7 +23,9 @@ from test_experimental_cpu import fixture
 
 class ExperimentalHeadless(unittest.TestCase):
     def run_process(self, script, args, root):
-        env = dict(os.environ, PYTHONPATH=os.pathsep.join((str(root), str(BACKEND.parent), str(BACKEND))),
+        # Add the package parent, never its contents: ghost_backend/io shadows
+        # the standard-library io module during Python 3.6 process startup.
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join((str(root), str(BACKEND.parent))),
                    OPENBLAS_NUM_THREADS='2', MKL_NUM_THREADS='2', OMP_NUM_THREADS='2')
         output = subprocess.run([sys.executable, str(script)] + list(args), cwd=str(root),
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

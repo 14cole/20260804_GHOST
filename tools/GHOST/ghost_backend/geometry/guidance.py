@@ -12,13 +12,15 @@ def refined_density(value, factor=2.):
     return str(-int(math.ceil((abs(n) or 20) * factor)))
 
 
-def geometry_refinement_candidates(segments, corner_angle_deg=25.):
+def geometry_refinement_candidates(segments, corner_angle_deg=25., point_tolerance=0.):
     """Identify snapshot segments touching open ends, bends, or material junctions.
 
     Coordinates are only used for direction and connectivity; no unit-dependent
     proximity threshold or guessed material wavelength enters this selection.
     """
     nodes = {}
+    def key(point):
+        return tuple(int(round(v / point_tolerance)) for v in point) if point_tolerance > 0 else tuple(point)
     for index, segment in enumerate(segments):
         pairs = segment.get("point_pairs", [])
         props = segment.get("properties", [])
@@ -29,8 +31,8 @@ def geometry_refinement_candidates(segments, corner_angle_deg=25.):
             length = np.linalg.norm(b-a)
             if length <= 0:
                 continue
-            nodes.setdefault(tuple(a), []).append((index, (b-a)/length, signature))
-            nodes.setdefault(tuple(b), []).append((index, (a-b)/length, signature))
+            nodes.setdefault(key(a), []).append((index, (b-a)/length, signature))
+            nodes.setdefault(key(b), []).append((index, (a-b)/length, signature))
     reasons = {}
     for neighbors in nodes.values():
         reason = None

@@ -105,28 +105,6 @@ class _FakeFreddyIntegration(QWidget):
         return True
 
 
-class _FakeRunsWorkspace(QWidget):
-    status_changed = Signal(str)
-    results_downloaded = Signal(str)
-
-    def __init__(self, parent=None, **_kwargs) -> None:
-        super().__init__(parent)
-        self.running = False
-        self.focus_called = False
-        self.save_count = 0
-        self.setLayout(QVBoxLayout())
-
-    def job_is_running(self) -> bool:
-        return self.running
-
-    def busy_operation(self) -> str | None:
-        return "HPC upload and submission" if self.running else None
-
-    def focus_workspace(self) -> None:
-        self.focus_called = True
-
-    def save_settings(self) -> None:
-        self.save_count += 1
 
 
 class _MemorySettings:
@@ -363,23 +341,17 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.freddy_patch = mock.patch.object(
             grim_cut_gui, "FreddyIntegrationWidget", _FakeFreddyIntegration
         )
-        self.runs_patch = mock.patch.object(
-            grim_cut_gui, "RunsWorkspace", _FakeRunsWorkspace
-        )
         self.ghost_patch.start()
         self.feature_patch.start()
         self.freddy_patch.start()
-        self.runs_patch.start()
         self.app_settings = _MemorySettings()
         self.window = _RecordingWindow(settings=self.app_settings)
 
     def tearDown(self) -> None:
         self.window.ghost_integration.running = False
         self.window.freddy_integration.running = False
-        self.window.runs_workspace.running = False
         self.window.deleteLater()
         self.app.processEvents()
-        self.runs_patch.stop()
         self.freddy_patch.stop()
         self.feature_patch.stop()
         self.ghost_patch.stop()
@@ -583,7 +555,6 @@ class UnifiedGuiShellTest(unittest.TestCase):
                 "GHOST",
                 "Assembly",
                 "PPT",
-                "Runs",
                 "Python",
             ],
         )
@@ -612,7 +583,7 @@ class UnifiedGuiShellTest(unittest.TestCase):
             self.window.main_tabs.indexOf(self.window.ppt_workspace), 5
         )
         self.assertEqual(
-            self.window.main_tabs.indexOf(self.window.runs_workspace), 6
+            self.window.main_tabs.indexOf(self.window.tab_python), 6
         )
         self.assertNotIn("ppt", self.window._plot_contexts)
 
@@ -663,7 +634,6 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.assertIn("qplaintextedit", qss)
         self.assertIn("background: #0b1222", qss)
         self.assertIn("color: #dbeafe", qss)
-        self.assertIn("qscrollarea#runscontrolsscroll", qss)
         self.assertIn("qscrollarea#pptcontrolsscroll", qss)
         self.assertEqual(
             self.window.ppt_workspace.controls_content.objectName(),
@@ -2374,46 +2344,7 @@ class UnifiedGuiShellTest(unittest.TestCase):
         )
         self.assertTrue(self.window.freddy_integration.focus_called)
 
-    def test_running_hpc_transfer_blocks_close_but_remote_jobs_do_not(self) -> None:
-        self.window.runs_workspace.running = True
-        event = QCloseEvent()
-        with mock.patch.object(grim_cut_gui.QMessageBox, "warning") as warning:
-            self.window.closeEvent(event)
 
-        self.assertFalse(event.isAccepted())
-        warning.assert_called_once()
-        self.assertIn("HPC upload", warning.call_args.args[2])
-        self.assertIs(
-            self.window.main_tabs.currentWidget(), self.window.runs_workspace
-        )
-        self.assertTrue(self.window.runs_workspace.focus_called)
-
-        # A tracked SLURM job is owned by the remote scheduler. Once the
-        # foreground SSH process is done, it must not trap GRIM open.
-        self.window.runs_workspace.running = False
-        event = QCloseEvent()
-        with mock.patch.object(grim_cut_gui.QMessageBox, "warning") as warning:
-            self.window.closeEvent(event)
-        self.assertTrue(event.isAccepted())
-        warning.assert_not_called()
-        self.assertGreater(self.window.runs_workspace.save_count, 0)
-
-    def test_downloaded_hpc_result_tree_reuses_dataset_loader(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            first = root / "results" / "FRD" / "first.grim"
-            second = root / "results" / "OPN" / "second.ptm"
-            ignored = root / "results" / "solver.log"
-            for path in (first, second, ignored):
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(b"test")
-
-            self.window.runs_workspace.results_downloaded.emit(str(root))
-
-        self.assertEqual(
-            self.window.loaded_path_batches,
-            [[str(first), str(second)]],
-        )
 
     def test_branch_drop_uses_canonical_workspace_tree(self) -> None:
         tree = self.window.assembly_workspace.assembly_tree_panel.tree

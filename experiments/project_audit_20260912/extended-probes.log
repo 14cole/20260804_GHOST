@@ -1,8 +1,0 @@
-experiments/project_audit_20260912\probe_workflows.py:49: UserWarning: constrained_layout not applied because axes sizes collapsed to zero.  Try making figure larger or Axes decorations smaller.
-  app.processEvents()
-{"name": "FREDDY batch export", "status": "PASS", "details": {"exports": ["experiments/project_audit_20260912\\extended-artifacts\\batch_0p1in.csv", "experiments/project_audit_20260912\\extended-artifacts\\batch_0p2in.csv"]}, "seconds": 0.859}
-{"name": "FREDDY exhaustive inverse grid", "status": "PASS", "details": {"candidates": 2, "checkpoint_count": 2}, "seconds": 0.235}
-{"name": "FREDDY sensitivity and statistical trial views", "status": "PASS", "details": {"trials": 16, "evaluations": 21, "views": ["Sensitivity ranking", "Parameter tolerance sweep", "Margin distribution", "Failure map", "Yield convergence"]}, "seconds": 0.672}
-{"name": "ISAR numerical export reopen comparison", "status": "PASS", "details": {"artifact": "experiments/project_audit_20260912\\extended-artifacts\\point.isar.npz", "max_self_difference_db": 0.0, "scaled_difference_db": 6.020599365234375}, "seconds": 0.515}
-{"name": "GHOST geometry to solve to export to GRIM", "status": "PASS", "details": {"exports": ["experiments/project_audit_20260912\\extended-artifacts\\square.grim"], "status": "Exported: square.grim", "datasets_imported": 3}, "seconds": 0.297}
-{"name": "Assembly body-only identity via real service", "status": "PASS", "details": {"output": "experiments/project_audit_20260912\\extended-artifacts\\body-only.grim", "shape": [3, 1, 2, 3]}, "seconds": 0.047}

@@ -75,7 +75,8 @@ def _2d_panel_limit() -> 'int':
     """Return the panel limit for the selected CPU factorization."""
     from ghost_backend.compressed.runtime import enabled
     from ghost_backend.twod.constants import MAX_PANELS_DEFAULT
-    return 100_000 if enabled() else MAX_PANELS_DEFAULT
+    from ghost_backend.execution.options import option
+    return 100_000 if enabled() or option('factorization') == 'adaptive' else MAX_PANELS_DEFAULT
 
 
 def _result_kind(result: 'Dict[str, Any]') -> 'str':
@@ -453,9 +454,13 @@ class _SolveWorker(QObject):
         preflight_setup=None,
         preflight_only=False,
         execution_options=None,
+        bor_options=None,
+        checkpoint_directory=None,
     ):
         super().__init__()
         self.solver_kind = str(solver_kind)
+        from ghost_backend.bor.options import validate_options as validate_bor_options
+        self.bor_options = validate_bor_options(bor_options or {})
         self.snapshot = snapshot
         self.source_path = source_path
         self.base_dir = base_dir
@@ -470,6 +475,7 @@ class _SolveWorker(QObject):
         from ghost_backend.execution.options import validate_options, from_environment
         self.execution_options = (validate_options(execution_options if execution_options is not None else from_environment())
                                   if self.solver_kind == '2d' else None)
+        self.checkpoint_directory = checkpoint_directory
         self.preflight_setup = preflight_setup
         self.preflight_only = preflight_only
         self.cfie_alpha = float(cfie_alpha)
@@ -500,6 +506,7 @@ class _SolveWorker(QObject):
             material_base_dir=self.base_dir,
             cfie_alpha=self.cfie_alpha,
             abort_event=self.abort_event,
+            bor_options=self.bor_options,
         )
         if self.mesh_certification:
             return solve_monostatic_rcs_bor_certified(
@@ -571,6 +578,10 @@ class _SolveWorker(QObject):
         )
         if self.mesh_certification:
             monostatic_kwargs["mesh_convergence_policy"] = mesh_policy
+        if self.checkpoint_directory:
+            from ghost_backend.twod.checkpoints import run_checkpointed
+            return run_checkpointed(solve_monostatic, monostatic_kwargs, self.checkpoint_directory,
+                self.execution_options, self.lu_precision, self.mesh_certification)
         return solve_monostatic(**monostatic_kwargs)
 
     @Slot()
@@ -587,7 +598,8 @@ class _SolveWorker(QObject):
 
     def _execute_run(self):
         from ghost_backend.execution.metrics import progress_listener
-        with progress_listener(self.telemetry.emit):
+        from ghost_backend.twod.preparation import preparation_scope
+        with preparation_scope(), progress_listener(self.telemetry.emit):
             return self._execute_profiled_run()
 
     def _execute_profiled_run(self):
@@ -595,7 +607,10 @@ class _SolveWorker(QObject):
             if self.preflight_setup is not None:
                 from ghost_backend.runs.setup import RunSetupMixin
                 self.progress.emit(0, 'Checking geometry, dimensions, and material coverage\u2026')
-                summary = RunSetupMixin._run_setup_summary(None, self.snapshot, self.base_dir, self.preflight_setup)
+                def checkpoint():
+                    if self.abort_event is not None and self.abort_event.is_set():
+                        raise InterruptedError('Setup check canceled.')
+                summary = RunSetupMixin._run_setup_summary(None, self.snapshot, self.base_dir, self.preflight_setup, checkpoint)
                 if self.abort_event is not None and self.abort_event.is_set():
                     raise InterruptedError('Setup check canceled.')
                 self.setup_checked.emit(summary)
@@ -609,7 +624,7 @@ class _SolveWorker(QObject):
             if self.abort_event is not None and self.abort_event.is_set():
                 raise InterruptedError("Solve canceled by user.")
         except InterruptedError as exc:
-            self.canceled.emit(str(exc) or "Solve canceled by user.")
+            self.canceled.emit((str(exc) or "Solve canceled by user.") + (" Completed frequency checkpoints were retained." if self.checkpoint_directory else ""))
             return
         except Exception as exc:
             if self.abort_event is not None and self.abort_event.is_set():
@@ -965,6 +980,10 @@ class SolverTab(RunSetupMixin, QWidget):
 
         advanced_form.addRow("CFIE alpha", self.edit_cfie_alpha)
         advanced_form.addRow("Mesh Certification", self.chk_mesh_certification)
+        self.chk_frequency_checkpoints = QCheckBox('Keep completed frequencies and resume matching runs')
+        self.chk_frequency_checkpoints.setChecked(True)
+        self.chk_frequency_checkpoints.setToolTip('2D monostatic results are saved in the application cache after each frequency. Changed inputs, material files, settings or solver source require recomputation.')
+        advanced_form.addRow('Frequency checkpoints', self.chk_frequency_checkpoints)
         advanced_form.addRow("Quality Thresholds", quality_threshold_row)
         self.advanced_settings_widget.setVisible(False)
 
@@ -1048,6 +1067,10 @@ class SolverTab(RunSetupMixin, QWidget):
         self.cmb_solver_method.setToolTip("2D monostatic solves, including supported PEC, IBC, dielectric, mixed and sheet cases. Streams every requested angle in double precision. The launch configuration selects dense or compressed CPU factorization; compressed mode avoids a global dense matrix.")
         self.cmb_solver_method.currentIndexChanged.connect(self._apply_job_state)
         advanced_form.addRow("2D kernel evaluation", self.cmb_solver_method)
+        from ghost_backend.ui.bor_options import BorOptionsWidget
+        self.bor_options_widget = BorOptionsWidget()
+        self.bor_options_widget.setVisible(False)
+        advanced_form.addRow(self.bor_options_widget)
         self.btn_solver_report = QPushButton("Accuracy and performance report...")
         self.btn_solver_report.clicked.connect(self._show_solver_report)
         advanced_form.addRow(self.btn_solver_report)
@@ -1429,7 +1452,7 @@ class SolverTab(RunSetupMixin, QWidget):
         enable_2d_quality_thresholds = not busy and not is_bor
         self.btn_run.setEnabled(not busy)
         for control in (self.save_run_setup_button, self.load_run_setup_button, self.run_preflight_button):
-            control.setEnabled(not busy and not is_bor)
+            control.setEnabled(not busy)
         self._sync_export_state()
         self.btn_currents.setEnabled(not busy and not is_bor)
         self.btn_browse_geo.setEnabled(not busy)
@@ -1447,11 +1470,12 @@ class SolverTab(RunSetupMixin, QWidget):
         self._update_mode_enables()
         self.chk_export_after_solve.setEnabled(not busy)
         self.chk_mesh_certification.setEnabled(not busy)
+        self.chk_frequency_checkpoints.setEnabled(not busy and self.cmb_solver_kind.currentData() == '2d' and self.cmb_scatter_mode.currentData() == 'monostatic')
         self.cmb_accuracy_target.setEnabled(not busy)
         method_available = not is_bor and self.cmb_scatter_mode.currentData() == "monostatic"
         if not method_available:
             self.cmb_solver_method.setCurrentIndex(0)
-        if method_available and self.execution_options_widget.factor_combo.currentData() == 'compressed':
+        if method_available and self.execution_options_widget.factor_combo.currentData() in ('compressed', 'adaptive'):
             self.cmb_solver_method.setCurrentIndex(self.cmb_solver_method.findData('experimental_cpu'))
         if self.execution_options_widget.factor_combo.currentData() != 'dense':
             self.cmb_lu_precision.setCurrentIndex(self.cmb_lu_precision.findData('double'))
@@ -1463,8 +1487,12 @@ class SolverTab(RunSetupMixin, QWidget):
             factor_widget.setCurrentIndex(factor_widget.findData('dense'))
         factor = factor_widget.currentData()
         self.execution_options_widget.setEnabled(not busy and not is_bor)
+        self.bor_options_widget.setEnabled(not busy and is_bor)
         factor_widget.setEnabled(not busy and method_available)
-        self.cmb_solver_method.setEnabled(not busy and method_available and factor != 'compressed')
+        self.cmb_solver_method.setEnabled(not busy and method_available and factor not in ('compressed', 'adaptive'))
+        self.execution_options_widget.mesh_combo.setEnabled(not busy and method_available)
+        if not is_bor and not method_available:
+            self.execution_options_widget.mesh_combo.setCurrentIndex(0)
         self.cmb_lu_precision.setEnabled(not busy and not experimental and factor == 'dense')
         self.btn_advanced_settings.setEnabled(not busy)
         self.edit_quality_residual_max.setEnabled(enable_2d_quality_thresholds)
@@ -1503,6 +1531,7 @@ class SolverTab(RunSetupMixin, QWidget):
 
     def _on_solver_kind_changed(self, _index: 'int' = 0) -> 'None':
         is_bor = (self.cmb_solver_kind.currentData() == "bor")
+        self.bor_options_widget.setVisible(is_bor)
         if is_bor:
 
             self.cmb_scatter_mode.setCurrentIndex(0)
@@ -1852,7 +1881,7 @@ class SolverTab(RunSetupMixin, QWidget):
 
         self._pending_solve_context = None
         self.progress.setValue(0)
-        self.lbl_status.setText("Solve canceled; no result was published.")
+        self.lbl_status.setText(_message or "Solve canceled; no result was published.")
         self._set_solving_state(False)
 
     @Slot(int)
@@ -1918,7 +1947,7 @@ class SolverTab(RunSetupMixin, QWidget):
                 obs_angles_list = self._parse_list(self.edit_obs_angles.text(), "Observation angles")
                 if not obs_angles_list:
                     raise ValueError("Bistatic mode requires at least one observation angle.")
-            preflight_setup = self._capture_run_setup() if solver_kind == '2d' else None
+            preflight_setup = self._capture_run_setup()
             if preflight_setup is not None:
                 self._update_run_output_note()
         except Exception as exc:
@@ -1964,6 +1993,9 @@ class SolverTab(RunSetupMixin, QWidget):
             solver_method=str(self.cmb_solver_method.currentData()),
             execution_options=self.execution_options_widget.value(),
             preflight_setup=preflight_setup,
+            bor_options=self.bor_options_widget.value(),
+            checkpoint_directory=(str(Path(QStandardPaths.writableLocation(QStandardPaths.CacheLocation)) / 'ghost-frequency-checkpoints')
+                if self.chk_frequency_checkpoints.isChecked() and solver_kind == '2d' and scatter_mode == 'monostatic' else None),
         )
         worker.moveToThread(thread)
 

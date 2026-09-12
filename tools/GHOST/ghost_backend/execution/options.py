@@ -14,6 +14,7 @@ from ghost_backend.execution.runtime import ScopedValue
 DEFAULTS = {
     'version': 1,
     'factorization': 'dense',
+    'mesh_strategy': 'global',
     'compressed_storage_mib': 2048,
     'ram_budget_gib': None,
     'temporary_directory': '',
@@ -50,8 +51,10 @@ def validate_options(value):
     result.update(value)
     if type(result['version']) is not int or result['version'] != 1:
         raise ValueError('Unsupported execution settings version.')
-    if result['factorization'] not in ('dense', 'hierarchical', 'auto', 'compressed'):
-        raise ValueError('Choose dense, hierarchical, auto, or compressed factorization.')
+    if result['factorization'] not in ('dense', 'hierarchical', 'auto', 'compressed', 'adaptive'):
+        raise ValueError('Choose dense, hierarchical, auto, compressed, or adaptive factorization.')
+    if result['mesh_strategy'] not in ('global', 'local'):
+        raise ValueError('Mesh strategy must be global or local.')
     if result['rhs_compression'] not in ('off', 'auto', 'on'):
         raise ValueError('RHS compression must be off, auto, or on.')
     for key, lower, upper in [('compressed_storage_mib', 16, 1048576),
@@ -94,10 +97,13 @@ def geometry_preset(name):
     elif name == 'balanced':
         values.update(factorization='dense')
         method = 'experimental_cpu'
+    elif name == 'adaptive':
+        values.update(factorization='adaptive')
+        method = 'experimental_cpu'
     elif name == 'large':
         method = 'experimental_cpu'
     else:
-        raise ValueError('Choose small, balanced, or large geometry settings.')
+        raise ValueError('Choose small, balanced, large, or adaptive geometry settings.')
     return dict(solver_method=method, lu_precision='double', execution_options=values)
 
 
@@ -159,11 +165,13 @@ def environment_value(name, default=''):
 def validate_for_run(options, method='direct', precision='double', scattering='monostatic', kind='2d'):
     value = validate_options(options)
     mode = value['factorization']
+    if value['mesh_strategy'] == 'local' and (kind != '2d' or scattering != 'monostatic'):
+        raise ValueError('Local material meshing supports 2D monostatic runs only.')
     if kind != '2d' and mode != 'dense':
         raise ValueError('Hierarchical and compressed selections apply to the 2D solver only.')
     if mode != 'dense' and (precision != 'double' or scattering != 'monostatic'):
         raise ValueError('Hierarchical and compressed runs require monostatic scattering and double precision.')
-    if mode == 'compressed' and method != 'experimental_cpu':
+    if mode in ('compressed', 'adaptive') and method != 'experimental_cpu':
         raise ValueError('Compressed assembly requires CPU streaming kernel evaluation.')
     if method == 'experimental_cpu' and (precision != 'double' or scattering != 'monostatic'):
         raise ValueError('CPU streaming requires monostatic scattering and double precision.')
@@ -209,18 +217,29 @@ def configured_execution(function):
         if requested is not None and inherited is not None and validate_options(requested) != inherited:
             raise ValueError('A nested solve must use the active execution settings.')
         value = requested if requested is not None else inherited
+        if value is None and os.environ.get('GHOST_CPU_FACTORIZATION', '').strip().lower() == 'adaptive':
+            value = from_environment()
         if value is None:
             return function(*args, **kwargs)
         bound = signature.bind(*args, **kwargs)
         bound.apply_defaults()
         from ghost_backend.linalg.refined_lu import requested_precision
-        validate_for_run(value, method=bound.arguments.get('solver_method', 'direct'),
+        value = validate_for_run(value, method=bound.arguments.get('solver_method', 'direct'),
                          precision=requested_precision(),
                          scattering='bistatic' if 'bistatic' in function.__name__ else 'monostatic')
+        selection = None
+        requested_value = value
+        if value['factorization'] == 'adaptive':
+            from ghost_backend.execution.selection import select_backend
+            selection = select_backend(bound.arguments, value, certified='certified' in function.__name__)
+            value = dict(value, factorization=selection['selected'])
         with execution_scope(value, limit_blas=requested is not None and inherited is None):
             result = function(*args, **kwargs)
             if isinstance(result, dict):
                 result.setdefault('metadata', {})['execution_options'] = current_options()
+                if selection is not None:
+                    result['metadata']['backend_selection'] = selection
+                    result['metadata']['requested_execution_options'] = requested_value
                 result['metadata']['execution_threads'] = dict(
                     assembly=effective_assembly_threads(), blas=current_options()['blas_threads'])
             return result

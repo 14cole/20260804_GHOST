@@ -142,6 +142,11 @@ def active_metrics():
     return _ACTIVE.get()
 
 
+def metrics_scope(metrics):
+    """Carry an existing solve's thread-safe metrics into a worker thread."""
+    return _ACTIVE.override(metrics)
+
+
 @contextmanager
 def solve_phase(name):
     """Label base, refined, or certification work in live metrics."""

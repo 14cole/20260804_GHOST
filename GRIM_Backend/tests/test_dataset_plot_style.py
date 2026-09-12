@@ -23,7 +23,7 @@ from GRIM_Backend.plotting.modes import (
 )
 from test_gui_shell import (
     _FakeFeatureWorkflow, _FakeFreddyIntegration, _FakeGhostIntegration,
-    _FakeRunsWorkspace, _MemorySettings, _RecordingWindow,
+    _MemorySettings, _RecordingWindow,
 )
 from test_plot_renderer_correctness import _grid
 
@@ -37,7 +37,6 @@ class DatasetPlotStyleTest(unittest.TestCase):
         for name, replacement in (
             ("GhostIntegrationWidget", _FakeGhostIntegration),
             ("FreddyIntegrationWidget", _FakeFreddyIntegration),
-            ("RunsWorkspace", _FakeRunsWorkspace),
         ):
             patch = mock.patch.object(grim_cut_gui, name, replacement)
             patch.start()

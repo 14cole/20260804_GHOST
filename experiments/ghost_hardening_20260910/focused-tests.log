@@ -1,6 +1,0 @@
-C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\.venv\Lib\site-packages\numpy\linalg\_linalg.py:2765: RuntimeWarning: overflow encountered in dot
-  sqnorm = x_real.dot(x_real) + x_imag.dot(x_imag)
-----------------------------------------------------------------------
-Ran 21 tests in 11.422s
-
-OK

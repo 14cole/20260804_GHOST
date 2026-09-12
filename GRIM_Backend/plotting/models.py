@@ -82,3 +82,6 @@ class PlotContext:
     last_plot_mode: str | None
     btn_export_isar_result: QToolButton | None = None
     last_python_plot_spec: tuple | None = None
+    delta_map_controls: Any = None
+    isar_advanced: Any = None
+    isar_tools: Any = None

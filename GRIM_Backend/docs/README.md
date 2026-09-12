@@ -4,7 +4,7 @@ Backend module locations and Python entry points are listed in the
 [backend guide](BACKEND.md).
 
 GRIM is the host application for this distribution. Its desktop tabs are
-**Plotting | ISAR | FREDDY | GHOST | Assembly | PPT | Runs | Python**. GHOST and FREDDY remain
+**Plotting | ISAR | FREDDY | GHOST | Assembly | PPT | Python**. GHOST and FREDDY remain
 self-contained tools under `tools/`; GRIM embeds their authoritative user
 interfaces instead of copying their numerical implementations into the
 plotting code.
@@ -15,6 +15,35 @@ Run GRIM from the repository root after an editable installation:
 py -m pip install -e .
 grim
 ```
+
+## Importing an unfamiliar text table
+
+Drop CSV, TXT, DAT, ASC, ASCII, or TSV files into GRIM, or use **Load**.
+Recognized formats use their existing readers. When a text table is not
+recognized, GRIM opens a column-labeling dialog after the background reader
+finishes. Review the source preview, delimiter, header setting, and any
+preamble lines to skip. Each selected variable can use a source column or
+one constant value for every row. Unused source columns are ignored.
+
+For a whitespace table ordered **frequency, azimuth, phase, magnitude**:
+
+1. Map those four source columns to their variables.
+2. Select the frequency unit, such as Hz; GRIM converts it to GHz.
+3. Select degrees or radians for the angles and phase.
+4. Set elevation to constant `0` and choose the polarization label (default `VV`).
+5. Declare whether magnitude is RCS amplitude, linear RCS power, dBsm,
+   scattering width, or a power/amplitude ratio, then import.
+
+The angular mapping uses GRIM's conic azimuth/elevation convention. A missing
+phase column stays unavailable when **phase** is unchecked. Check it and enter
+a constant only when a fixed phase is intended. Missing grid combinations
+remain missing; conflicting duplicate samples are rejected.
+
+Imported mapped tables appear as unsaved datasets. **Save** writes their GRIM
+representation, including the column and unit mapping in the history and
+metadata. Source text files are kept unchanged. Cancelling one file's labeling
+continues the remaining import queue. Use **FREDDY → File → File Converter…**
+to save a standalone converted CSV or whitespace table instead.
 
 ## Appearance
 
@@ -145,6 +174,33 @@ reported statistic remains restricted to the entered Min/Max sector.
 The yellow region marks that entered statistics range only when it is narrower
 than the full common azimuth span; a full-span comparison has no highlight.
 
+**Delta Map** beside RF Compare compares two selected datasets over any two
+of frequency, azimuth/aspect, and elevation/pitch. Select the displayed ranges
+and one polarization in the sidebar, then choose the horizontal/vertical axes
+and the fixed third coordinate above the plot. The fixed-coordinate dropdown
+contains the reference dataset's coordinates. Dataset A and B are named above
+the plot; **Swap A / B** reverses the signed subtraction.
+
+Each cell is the difference of the two logarithmic levels, labeled **A - B
+(dB)**. Source values in the hover/click readout retain dBsm, dBke, or dB.
+Blue is negative, red is positive, and the scale is symmetric around zero.
+Turn off **Auto color limits** to lock a symmetric ±dB range across slices.
+Clipped scales have colorbar extensions. **Cell values** labels maps up to
+200 cells; larger maps retain the detailed hover readout. Click a cell to keep
+its readout after leaving the axes. Export Plot and the Python recorder support
+the map, including its axes, fixed slice, source order, and color limits.
+
+Matching uses the existing physical coordinate tolerances (1 kHz and 1e-6
+degrees), with no interpolation, fixed-axis broadcasting, or implicit angular
+frame conversion. Mixed physical quantities or log conventions are rejected.
+The selected reference grid is preserved: unmatched cells, nonfinite values,
+and nonpositive powers are gray, never silently filled or floored. An absent
+fixed coordinate, ambiguous match, or wholly unpaired slice stops the plot.
+Only the selected 2-D slice is gathered, with a two-million-cell limit checked
+before gathering. Delta Map always compares logarithmic levels; use RF Compare
+for phase comparisons. Each colored box represents a sampled coordinate pair,
+not an average over its drawn area.
+
 Rendering caps the number of visible lines, points, image cells, waterfall
 panels, and explicit ticks. Line and magnitude-image reduction retain bucket
 extrema; oversized phase images stop with a request to narrow the axes rather
@@ -161,21 +217,24 @@ power—not on already-logarithmic dB samples—and creates compact reduced grid
 default; repeating a statistic across the original grid is an explicit,
 memory-preflighted opt-in.
 
-The simple **Percentile** dataset operation is a shortcut for the common case:
-it asks for a percentile (90 by default), computes it across azimuth on linear
-power, and creates one result per selected dataset. Every original azimuth bin
-is replaced by that percentile value at its elevation/frequency/polarization,
-so all axes and their coordinates are preserved. As with other incoherent
-statistics, coherent phase is undefined.
+The standalone **Percentile** button is an azimuth-reduction preset of the same
+statistics workflow. It asks only for the percentile (90 by default), computes
+it across all azimuths on linear power, and creates one compact result per
+selected dataset. Elevation, frequency and polarization axes are preserved;
+azimuth becomes a singleton aggregate label rather than a measured direction.
+Coherent phase is undefined. For a repeated reference curve on the original
+azimuth grid, use **Stats → percentile**, reduce **Azimuth** only, and enable
+**Repeat the reduced value across the original grid**.
 
 The divider between Datasets and Parameters can be dragged vertically: dragging
 it upward enlarges the parameter lists and reduces the dataset table, while
 dragging it downward does the reverse. The active row continues to drive the
 parameter lists. `Ctrl+O` opens datasets, `Ctrl+Shift+O` performs Overlap, and
 ordered subtraction/division use selection order. Delta-dB and coherent
-division require exactly two operands. **Join** unions existing bins
-without interpolation, merges equal or complementary finite overlaps, and
-rejects conflicts; it never silently applies a hidden first/last-wins rule.
+division require exactly two operands. **Join / Merge…** (also `Ctrl+J`) opens
+one dialog for unioning existing bins without interpolation. The default merges
+equal or complementary finite overlaps and rejects conflicts; priority and
+averaging policies must be selected explicitly.
 
 ## ISAR formation and numerical results
 
@@ -204,12 +263,51 @@ weak wanted scatterer is suppressed. Wide selections use a labeled nonlinear
 max-look composite of narrow subapertures and are qualitative rather than a
 single coherent 360-degree reconstruction.
 
+**Plan image** evaluates the selected acquired frequencies and angles without
+forming an image. In **ISAR Settings**, enter the occupied cross-range and range
+half extents in metres, then choose **Recommended PFA** for a scene-dependent
+Fast/Accurate choice. The planner distinguishes native phase increments from
+Fast PFA range-curvature error. Passing a sampling check is not a guarantee of
+interpolation accuracy; upsampling cannot recover missing measurements. Without
+entered bounds, advice uses nominal periodic scene limits and labels that
+assumption. Coherent bounds use the mean-look frame; composite bounds use the
+fixed body frame. Elevation projects the horizontal image plane and cannot
+independently resolve height from one angular cut.
+
+**Image mode** explicitly selects a single coherent image, a qualitative max-look
+composite, or the legacy automatic policy (composite above 20 degrees). Coherent
+PFA requires an aperture narrower than 90 degrees. Every composite sublook now
+respects a 10-degree angular bound, including acquisitions whose angular density
+changes. Regular strided angular selections form a band; disconnected physical
+sectors form separate images. An isolated sector produces an actionable error.
+Composite grid size is configurable from 32 to 4096 pixels per side. Scene bounds
+crop the retained result but do not reduce the full coherent FFT or add resolution.
+Frequency-band controls display the dataset's own units and acquired bounds.
+
+The persistent **Quality** panel shows physical ranges, sampling/curvature
+warnings, coverage/gaps, nominal resolution, and windowed origin PSF cuts. Power
+FWHM, peak sidelobe ratio and integrated sidelobe ratio describe **one-dimensional
+cuts** through the origin response on the actual gridded support, not a full 2D
+ISLR or an off-center focusing guarantee. Sparse and composite formation are
+nonlinear and have no single fixed PSF; composite artifacts retain individual
+look diagnostics. Sparse quality also includes a native polar-data residual,
+distinct from its gridded optimization residual. The bounded diagnostic uses up
+to 4096 source positions and 512 retained image points, records sampling and
+omitted-energy fractions, and explains when it cannot be computed. It evaluates
+the full formed image before optional scene cropping and display flips.
+**Cancel** stops at a processing block, with worker-stage progress in the status
+bar. Sparse-only controls and the ignored Sparse taper are disabled appropriately.
+
 Nonuniform samples are interpolated only within acquired support. Missing
 frequency or azimuth sectors are placed on the uniform working grid with zero
 measurement weight; GRIM reports their count, size, unsupported fraction, and
 resulting phase coverage. It never turns a large unmeasured sector into
 fully-observed synthetic samples. An excessive expansion stops with guidance to
 form contiguous bands separately.
+Accurate PFA shares interpolation geometry between the complex numerator and
+coverage. Fully observed cubic stencils retain cubic interpolation; stencils
+touching missing data use the same positive linear weights for both arrays.
+This preserves the coherent gain of an origin point under missing support.
 
 **Export ISAR Result** saves the latest completed full-resolution image as a
 transactional `.isar.npz` artifact. Coherent looks include the complex image and
@@ -226,6 +324,48 @@ recursively bounded metadata before numerical extraction; complex axes,
 post-cast overflow, malformed legacy magnitude, object payloads, duplicate/path
 members, and oversized manifests fail closed. Wide max-look composites
 explicitly record that no complex image exists.
+
+Artifacts also save all six gap diagnostics with units, engine version,
+realized spatial-frequency support, phase/frame conventions, accuracy plans,
+PSF/native residuals, memory accounting, and exact composite sublook indices.
+Complex pixels use a spatial-frequency-origin-demodulated phase convention;
+`physical_coefficients(image, x_range, y_range, image_contract)` restores physical
+point-coefficient phases. It does not make a general FFT image an exact sparse
+point model. Image intensity remains generic dB, not calibrated per-pixel dBsm
+or dBke. Pixel-center axes are displayed using their outer half-cell boundaries.
+
+**Open result** loads a numerical artifact without its original acquisition.
+**Compare result** compares the current completed image against a saved artifact,
+or loads two files when no current image exists. It checks image/frame,
+normalization, acquisition and declared phase/calibration compatibility. Older
+artifacts without the required contracts can be viewed but must be re-formed
+for quantitative comparison. Comparisons provide shared intensity scales,
+linked physical axes, A-minus-B intensity differences, peak profiles and
+statistics for the current zoomed ROI. Different grids require explicit
+resampling of **linear intensity** onto their physical overlap; dB is never
+interpolated. The GUI limits comparisons to one million overlap cells and
+preflights additional artifact arrays against a 512 MiB viewer allocation
+allowance with space reserved for plotting. Coverage and PSF differences still
+need interpretation; compatible metadata alone does not certify calibration.
+
+**Save recipe** freezes the accepted formation recipe as non-executable
+`.isar.json`, including physical azimuth, frequency, elevation and polarization
+selectors. **Load recipe** validates those samples against the active dataset
+and restores controls; it does not automatically form an image. Equivalent
+Hz/GHz axes match. Settings outside GUI precision or limits are explained before
+any control is changed. Headless replay uses the same validated selectors:
+
+```python
+from GRIM_Backend.scripting.api import load_recipe, recipe_arguments, form_isar
+
+options = recipe_arguments(dataset, load_recipe("image.isar.json"))
+bands, elapsed = form_isar(dataset, retain_complex=True, **options)
+```
+
+`plan_isar(unwrapped_azimuth_degrees, frequency_hz, ...)` and the bounded native
+`PolarPointOperator` forward/adjoint are available through the scripting API.
+The adjoint is not an inverse; Sparse L1 still uses its existing gridded LASSO
+objective. A production accelerated native reconstruction remains future work.
 
 Export Plot and numerical-result export are disabled while a newer formation is
 pending, so a previous canvas cannot be mistaken for current settings. Clearing
@@ -278,6 +418,12 @@ absolute tolerance in the already-matched declared axis units; for example,
 datasets declared in GHz receive a GHz tolerance, not an Hz tolerance.
 The reusable ISAR preprocessing cache is byte-bounded and synchronized so
 independent headless image formations may run concurrently.
+Small interpolation geometry plans share an additional 8 MiB LRU cache; blocks
+adapt to long axes. Selected-source hashes use bounded blocks while preserving
+the exact previous digest, including in-place mutation detection. Memory
+diagnostics separate source power/phase arrays, retained earlier band results,
+caches, and the additional formation allowance. This is not a total process-RSS
+cap; the application, raw source arrays and plotting also consume memory.
 
 ### Crop / Slice and Regrid
 
@@ -298,14 +444,13 @@ power interpolation and keep phase unknown. Regridding to a coarser spacing is
 not an anti-alias filter. The GUI reports that fact in status and performs the
 requested regrid without a second prompt.
 
-### Join and Merge Overlaps
+### Join / Merge
 
-Both operations form the union of all four axes using existing coordinates;
-neither interpolates samples. **Join** is the fail-closed choice for
-complementary shards: any conflicting finite overlap stops the operation.
-**Merge Overlaps...** is the deliberate conflict-resolution workflow and fills
-finite samples according to one named policy shown in its dialog and recorded
-in provenance. Input order is significant for the priority policies:
+**Join / Merge…** forms the union of all four axes using existing coordinates,
+without interpolation. Its default **Join: reject conflicting overlaps** is
+the choice for complementary shards: any conflicting finite overlap stops the
+operation. The same dialog offers four explicit conflict-resolution policies.
+Input order is significant for the priority policies:
 
 - `priority-first` keeps the first finite power/phase sample as one atomic
   sample; later inputs still fill missing cells.
@@ -318,10 +463,26 @@ in provenance. Input order is significant for the priority policies:
   phase-reference, time-convention, and polarization-basis annotations are
   recorded as advisories without changing the supplied samples.
 
-The GUI adds the reversible unsaved result directly and reports overlap,
-missing, contributor, and resolved-conflict counts in status. The result's
-history and `grim.stitch-provenance.v1` record retain the policy, tolerance,
-counts, metadata assumptions, and input sources.
+The native-axis tolerance defaults to `1e-6`; selected datasets must use the
+same storage units. The chosen tolerance is retained in history and recorded
+Python commands for strict joins as well as merges. For merge policies, the GUI
+reports overlap, missing, contributor, and resolved-conflict counts; the result's
+`grim.stitch-provenance.v1` record retains policy, tolerance, counts, metadata
+assumptions and input sources. All policies create a new unsaved dataset.
+
+### Extrusion estimates
+
+**Extrusion…** replaces the separate dBke/dBsm conversion buttons. Choose
+**3D RCS → 2D width (dBsm → dBke)** or the reverse, and enter extrusion length
+in inches, feet or meters. The initial direction follows the first selected
+dataset's quantity and can be changed. Incompatible source quantities are
+reported as skipped. The calculation and Python recording use length in meters.
+
+The existing model assumes broadside illumination of a uniform extruded body:
+`sigma_3D = sigma_2D * 2 * L² / wavelength`. This is an extrusion estimate, not a
+general conversion of arbitrary 2D/3D geometries. The dialog shows the formula
+for the selected direction. Output history records direction, length and the
+geometry assumption; dimensionless power ratios are rejected.
 
 ### Phase and azimuth wrapping
 
@@ -641,77 +802,37 @@ analyzes material stacks and exports GHOST-compatible IBC or material CSV
 files; it does not calculate finite-object RCS and does not produce `.grim`
 files. Its CSV outputs therefore are not routed into GRIM's RCS dataset table.
 
-FREDDY background calculations are not cancellable. GRIM blocks application
-close while one is running so the shared process cannot be torn down partway
-through a calculation.
+FREDDY Inverse Design supports stop/keep/resume, while Material Mix can stop
+and discard incomplete results. Ordinary analysis/export jobs run to completion.
+GRIM blocks application close while a job runs so the shared process cannot be
+torn down partway through a calculation.
+
+FREDDY's searchable **About & Guide** describes every plot family and gives
+mode-specific workflows with expected results. **F1** opens workflow help;
+**Explain view** in Results opens the plot catalog. Analysis Results include
+a sortable reflection margin and **Export comparison CSV…**, preserving the
+completed run's context, target, band, bound, and sample identity.
 
 FREDDY's **Material Explorer** is a read-only comparison workspace for measured
 permittivity/permeability CSVs. It is available in both embedded and standalone
 FREDDY, uses native file frequency grids, and does not alter the solver stack,
 project dirty state, or current GHOST attachment.
 
-## HPC Runs
+## HPC scripts
 
-The **Runs** tab builds GHOST 2-D or BoR sweep requests from saved `.geo`
-files, their FRD/OPN/BoR roles, frequency and angle grids, geometry units,
-mesh-certification choice, and SLURM resources. **Export Bundle** writes a
-portable, hash-verified folder with relative geometry/material inputs and a
-one-command Linux README. It is a request—not a Windows-created solver run.
+Use GHOST's `run_hpc_monostatic.py` for 2D sweeps and
+`run_hpc_bor_monostatic.py` for BoR sweeps. Both live under
+`tools/GHOST/ghost_backend/`. Their local counterparts are
+`run_local_monostatic.py` and `run_local_bor.py`. Configure geometry inputs,
+frequency/angle grids, numerical settings, and resources in the driver's
+CONFIG block or validated JSON configuration. A matching saved GHOST
+`.run.json` setup can be embedded in that configuration as `run_setup`.
 
-**Upload & Submit** builds a fresh temporary copy of the visible request,
-uploads it through Windows OpenSSH or a saved PuTTY/Plink session, and invokes
-the matching `tools/GHOST/ghost_backend/hpc/bundle.py` on the Linux login node. Linux
-then creates the configured driver, absolute paths, runtime/source provenance,
-run manifest, schedule, and SLURM submission. The returned job IDs are tracked
-in the tab; **Refresh**, **Cancel Job**, and **Download Results** reconnect only
-for that operation. Submitted SLURM jobs continue after SSH disconnects and do
-not require GRIM to remain open.
-
-GRIM records the bundle ID and expected remote `stage_result.json` before the
-upload begins. If SSH drops while `sbatch` is running, the run is marked
-**SUBMISSION UNKNOWN** rather than submitted again; use **Refresh** to recover
-the stage result and any job IDs. Refresh also shows recent submission and
-SLURM task logs. A terminal scheduler state alone is not treated as success:
-Refresh invokes the Linux bundle helper's read-only `run-status` check and
-requires the exact manifest output set, valid embedded unit attestations, and
-(for BoR) every readable, run-bound published body GRIM. Download repeats that
-remote check immediately before transfer, and GRIM refuses to merge results
-into an existing local `results` folder. The **Remote Python** field defaults
-to `python3`; point it at
-the cluster virtual-environment interpreter when the default environment does
-not contain GHOST's dependencies.
-
-GRIM stores non-secret connection metadata such as host/profile, username,
-port, remote paths, and identity-file path. It never stores a password,
-passphrase, or private-key contents. Unknown host keys fail closed; verify the
-fingerprint through an approved SSH/PuTTY connection first. Password-only,
-interactive MFA, VPN, jump-host, or site-policy restrictions may require an
-OpenSSH config alias, an approved agent/session, or the manual bundle workflow.
-See `tools/GHOST/HPC.md` for Linux staging and scheduler details.
-
-If PuTTY reports **cannot answer interactive prompts in batch mode**, load the
-exact saved session named in Runs and first expose the unanswered prompt from
-PowerShell:
-
-```powershell
-plink.exe -v -T -load "Exact Saved Session Name" "echo GRIM_HPC_OK; hostname; id -un"
-```
-
-Save the username under **Connection > Data > Auto-login username**, accept a
-host key only after verifying its fingerprint, and use an approved key already
-unlocked in Pageant. Then verify the same path GRIM uses:
-
-```powershell
-plink.exe -batch -T -load "Exact Saved Session Name" "echo GRIM_HPC_OK; hostname; id -un"
-```
-
-If the site requires password or MFA entry on every new connection, enable
-**Connection > SSH > Share SSH connections if possible** in that saved session,
-open and authenticate the PuTTY session, and leave it open while GRIM runs.
-`plink.exe -shareexists -load "Exact Saved Session Name"` returns exit code zero
-when that upstream is reusable. If policy forbids either keys or connection
-sharing, use **Export Bundle** and submit through the approved interactive path;
-do not place a password on a Plink command line.
+The [HPC guide](../../tools/GHOST/HPC.md) covers submission, scheduling,
+resuming interrupted runs, and the bundle CLI for packaging portable inputs
+on Windows and staging them on Linux. Use cluster tools to monitor and manage
+jobs. Transfer completed `.grim` files locally, then open or drop them into
+GRIM to inspect the results.
 
 ## Python recorder
 

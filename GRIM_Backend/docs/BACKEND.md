@@ -23,7 +23,6 @@ Only runnable entry points live at the package root:
 | `assembly/` | Assembly models, recipes, editors, workflows, and workspaces |
 | `integrations/` | GHOST and FREDDY discovery and embedding |
 | `execution/` | Background dataset jobs and startup diagnostics |
-| `runs/` | Remote job handling and the Runs workspace |
 | `reports/` | PowerPoint reports, image imprinting, report recipes, and `templates/` |
 | `scripting/` | Headless API, command-line interface, action recording, and plot scripting |
 | `examples/` | Editable dataset and plotting examples |

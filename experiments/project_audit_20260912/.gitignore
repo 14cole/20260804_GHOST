@@ -1,9 +1,0 @@
-__pycache__/
-*.ini
-*.grim
-*.csv
-*.pptx
-*.isar.npz
-recorded-workflow.py
-extended-artifacts/
-material-artifacts/

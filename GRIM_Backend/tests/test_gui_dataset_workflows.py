@@ -27,8 +27,9 @@ from GRIM_Backend.ui.dataset_actions import (
     DATASET_PATH_ROLE,
     DatasetAuditDialog,
     DecimateDialog,
+    ExtrusionConversionDialog,
+    JoinDialog,
     RegridDialog,
-    StitchDialog,
     WrapDialog,
 )
 from GRIM_Backend.datasets.grid import RcsGrid
@@ -37,7 +38,6 @@ from test_gui_shell import (
     _FakeFeatureWorkflow,
     _FakeFreddyIntegration,
     _FakeGhostIntegration,
-    _FakeRunsWorkspace,
     _RecordingWindow,
 )
 
@@ -288,7 +288,7 @@ class DatasetOperationDialogTest(unittest.TestCase):
         reference = _mixed_unit_grid(radians=True, frequency_hz=False)
         crop = CropDialog(reference, has_selected_values=True)
         regrid = RegridDialog(reference)
-        stitch = StitchDialog(["first", "second"])
+        stitch = JoinDialog(["first", "second"])
         wrap = WrapDialog()
         decimate = DecimateDialog()
         self.addCleanup(crop.deleteLater)
@@ -303,7 +303,12 @@ class DatasetOperationDialogTest(unittest.TestCase):
         self.assertAlmostEqual(crop._range_controls["azimuth"][2].value(), 180.0)
         self.assertEqual(regrid._axis.itemText(0), "Azimuth")
         self.assertEqual(regrid.get_params()["unit"], "deg")
-        self.assertIn("overlap phase removed", stitch._policy.itemText(2))
+        self.assertEqual(stitch.get_params()["policy"], "error")
+        self.assertEqual(stitch._policy.count(), 5)
+        self.assertIn(
+            "overlap phase removed",
+            stitch._policy.itemText(stitch._policy.findData("power-mean")),
+        )
         self.assertIn("declared native axis units", stitch._tolerance_help.text())
         self.assertIn("same units", stitch._tolerance_help.text())
         self.assertEqual(wrap._rb_0_360.text(), "[0°, 360°)")
@@ -353,22 +358,16 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
         self.freddy_patch = mock.patch.object(
             grim_cut_gui, "FreddyIntegrationWidget", _FakeFreddyIntegration
         )
-        self.runs_patch = mock.patch.object(
-            grim_cut_gui, "RunsWorkspace", _FakeRunsWorkspace
-        )
         self.ghost_patch.start()
         self.feature_patch.start()
         self.freddy_patch.start()
-        self.runs_patch.start()
         self.window = _RecordingWindow()
 
     def tearDown(self) -> None:
         self.window.ghost_integration.running = False
         self.window.freddy_integration.running = False
-        self.window.runs_workspace.running = False
         self.window.deleteLater()
         self.app.processEvents()
-        self.runs_patch.stop()
         self.freddy_patch.stop()
         self.feature_patch.stop()
         self.ghost_patch.stop()
@@ -408,12 +407,16 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
         widget.setCurrentItem(item)
 
     def test_join_and_merge_actions_explain_their_overlap_workflows(self) -> None:
-        self.assertEqual(self.window.btn_join.text(), "Join")
-        self.assertEqual(self.window.btn_stitch.text(), "Merge Overlaps...")
+        self.assertEqual(self.window.btn_join.text(), "Join / Merge…")
+        self.assertFalse(hasattr(self.window, "btn_stitch"))
         self.assertIn("without interpolation", self.window.btn_join.toolTip())
         self.assertIn("conflicting finite overlap", self.window.btn_join.toolTip())
-        self.assertIn("without interpolation", self.window.btn_stitch.toolTip())
-        self.assertIn("resolve conflicting overlaps", self.window.btn_stitch.toolTip())
+        self.assertIn("conflicting overlaps", self.window.btn_join.toolTip())
+        self.assertEqual(self.window.btn_percentile.text(), "Percentile")
+        self.assertIn("compact", self.window.btn_percentile.toolTip())
+        self.assertEqual(self.window.btn_extrusion.text(), "Extrusion…")
+        self.assertFalse(hasattr(self.window, "btn_to_dbke"))
+        self.assertFalse(hasattr(self.window, "btn_to_dbsm"))
         self.assertIn("anti-alias", self.window.btn_decimate.toolTip().lower())
 
     def test_dataset_actions_follow_selection_count_and_dirty_state(self) -> None:
@@ -646,6 +649,144 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
             "Dataset audit complete: 1 pass, 1 warning, 1 fail.",
         )
 
+    def _add_saved_fixture(self, dataset, name):
+        folder = tempfile.TemporaryDirectory(prefix="grim-operation-test-")
+        self.addCleanup(folder.cleanup)
+        path = str(Path(folder.name) / "source.grim")
+        dataset.save(path)
+        return self.window._add_dataset_row(dataset, name, "Loaded", path)
+
+    def _replay_recorded_datasets(self):
+        namespace = {"__name__": "__grim_test_replay__", "__file__": __file__}
+        exec(compile(self.window.python_recorder.script, "<operation replay>", "exec"), namespace)
+        return [value for value in namespace.values() if isinstance(value, RcsGrid)]
+
+    def test_join_strict_policy_uses_and_records_chosen_tolerance(self) -> None:
+        self._add_saved_fixture(_axis_grid([0.0], 2.0), "First")
+        self._add_saved_fixture(_axis_grid([0.0005], 2.0), "Second")
+        self._select_rows_in_order(0, 1)
+        with mock.patch("GRIM_Backend.ui.dataset_actions.JoinDialog") as dialog_type:
+            dialog_type.return_value.exec.return_value = QDialog.Accepted
+            dialog_type.return_value.get_params.return_value = {"policy": "error", "tol": 0.001}
+            self.window.btn_join.click()
+            self._wait_for_background()
+        self.assertEqual(self.window.table.rowCount(), 3)
+        joined = self.window.table.item(2, 0).data(Qt.UserRole)
+        np.testing.assert_array_equal(joined.azimuths, [0.0])
+        np.testing.assert_allclose(joined.rcs_power, 4.0)
+        self.assertIn("tol=0.001", self.window.python_recorder.script)
+        self.assertIn("join_datasets(", self.window.python_recorder.script)
+        self.assertIn("tol=0.001", self.window.table.item(2, 2).text())
+        replayed = self._replay_recorded_datasets()[-1]
+        np.testing.assert_array_equal(replayed.azimuths, joined.azimuths)
+        np.testing.assert_allclose(replayed.rcs, joined.rcs)
+
+    def test_join_strict_conflict_and_cancel_publish_nothing(self) -> None:
+        self.window._add_dataset_row(_axis_grid([0.0], 1.0), "First", "Loaded")
+        self.window._add_dataset_row(_axis_grid([0.0], 2.0), "Second", "Loaded")
+        self._select_rows_in_order(0, 1)
+        with mock.patch("GRIM_Backend.ui.dataset_actions.JoinDialog") as dialog_type:
+            dialog = dialog_type.return_value
+            dialog.exec.return_value = QDialog.Rejected
+            self.window.btn_join.click()
+            self.assertFalse(self.window._background_job_active())
+            dialog.get_params.assert_not_called()
+            dialog.exec.return_value = QDialog.Accepted
+            dialog.get_params.return_value = {"policy": "error", "tol": 1.0e-6}
+            self.window.btn_join.click()
+            self._wait_for_background()
+        self.assertEqual(self.window.table.rowCount(), 2)
+        self.assertIn("conflict", self.window.status.currentMessage().lower())
+
+    def test_join_dialog_routes_every_merge_policy_and_records_assumptions(self) -> None:
+        self._add_saved_fixture(_axis_grid([0.0], 1.0), "First")
+        self._add_saved_fixture(_axis_grid([0.0], 3.0), "Second")
+        for policy, power in (("priority-first", 9), ("priority-last", 1),
+                              ("power-mean", 5), ("coherent-mean", 4)):
+            with self.subTest(policy=policy):
+                self._select_rows_in_order(1, 0)
+                with (
+                    mock.patch("GRIM_Backend.ui.dataset_actions.JoinDialog") as dialog_type,
+                    mock.patch.object(self.window, "_confirm_coherent_metadata", return_value=True),
+                ):
+                    dialog_type.return_value.exec.return_value = QDialog.Accepted
+                    dialog_type.return_value.get_params.return_value = {"policy": policy, "tol": 1.0e-6}
+                    self.window.btn_join.click()
+                    self._wait_for_background()
+                result = self.window.table.item(self.window.table.rowCount() - 1, 0).data(Qt.UserRole)
+                np.testing.assert_allclose(result.rcs_power, power)
+                if policy == "power-mean":
+                    self.assertTrue(np.isnan(result.rcs_phase).all())
+        self.assertEqual(self.window.table.rowCount(), 6)
+        self.assertIn("metadata_attested=True", self.window.python_recorder.script)
+        for replayed, row in zip(self._replay_recorded_datasets()[-4:], range(2, 6)):
+            output = self.window.table.item(row, 0).data(Qt.UserRole)
+            np.testing.assert_allclose(replayed.rcs_power, output.rcs_power)
+            np.testing.assert_allclose(replayed.rcs_phase, output.rcs_phase)
+
+    def test_extrusion_dialog_switches_direction_formula_and_length_units(self) -> None:
+        dialog = ExtrusionConversionDialog(destination="dbsm")
+        self.addCleanup(dialog.deleteLater)
+        self.assertEqual(dialog.destination(), "dbsm")
+        self.assertIn("σ_3D =", dialog._formula.text())
+        self.assertAlmostEqual(dialog.length_m(), 24 * 0.0254)
+        dialog._direction.setCurrentIndex(dialog._direction.findData("dbke"))
+        self.assertEqual(dialog.destination(), "dbke")
+        self.assertIn("σ_2D =", dialog._formula.text())
+        dialog._combo.setCurrentText("ft")
+        dialog._spin.setValue(2)
+        self.assertAlmostEqual(dialog.length_m(), 0.6096)
+
+    def test_extrusion_button_converts_both_directions_and_records_recipe(self) -> None:
+        source = _axis_grid([0.0, 90.0], 2.0)
+        self._add_saved_fixture(source, "Source")
+        for input_row, destination in ((0, "dbke"), (1, "dbsm")):
+            self._select_rows_in_order(input_row)
+            with mock.patch("GRIM_Backend.ui.dataset_actions.ExtrusionConversionDialog") as dialog_type:
+                dialog = dialog_type.return_value
+                dialog.exec.return_value = QDialog.Accepted
+                dialog.destination.return_value = destination
+                dialog.length_m.return_value = 2.0
+                dialog.display_text.return_value = "2 m"
+                self.window.btn_extrusion.click()
+                self._wait_for_background()
+                self.assertEqual(dialog_type.call_args.kwargs["destination"], destination)
+        width = self.window.table.item(1, 0).data(Qt.UserRole)
+        restored = self.window.table.item(2, 0).data(Qt.UserRole)
+        self.assertEqual(width.linear_quantity(), "sigma_2d")
+        np.testing.assert_allclose(width.rcs_power, 4.0 * 299792458.0 / (8.0 * 10e9))
+        np.testing.assert_allclose(restored.rcs, source.rcs)
+        self.assertEqual(restored.linear_quantity(), "sigma_3d")
+        script = self.window.python_recorder.script
+        self.assertIn("to='dbke'", script)
+        self.assertIn("to='dbsm'", script)
+        self.assertIn("length_m=2.0", script)
+        np.testing.assert_allclose(self._replay_recorded_datasets()[-1].rcs, restored.rcs)
+
+    def test_extrusion_explicit_direction_skips_wrong_quantity_and_cancel_is_idle(self) -> None:
+        area = _axis_grid([0.0], 2.0)
+        width = _axis_grid([0.0], 2.0)
+        width.units.update(rcs_linear_quantity="sigma_2d", rcs_log_unit="dBke")
+        self.window._add_dataset_row(width, "Width", "Loaded")
+        self.window._add_dataset_row(area, "Area", "Loaded")
+        self._select_rows_in_order(0, 1)
+        with mock.patch("GRIM_Backend.ui.dataset_actions.ExtrusionConversionDialog") as dialog_type:
+            dialog = dialog_type.return_value
+            dialog.exec.return_value = QDialog.Rejected
+            self.window.btn_extrusion.click()
+            self.assertFalse(self.window._background_job_active())
+            self.assertEqual(self.window.table.rowCount(), 2)
+            dialog.exec.return_value = QDialog.Accepted
+            dialog.destination.return_value = "dbke"
+            dialog.length_m.return_value = 2.0
+            dialog.display_text.return_value = "2 m"
+            self.window.btn_extrusion.click()
+            self._wait_for_background()
+            self.assertEqual(dialog_type.call_args.kwargs["destination"], "dbsm")
+        self.assertEqual(self.window.table.rowCount(), 3)
+        self.assertIn("Skipped: Width", self.window.status.currentMessage())
+        self.assertIn("Area", self.window.table.item(2, 0).text())
+
     def test_stitch_auto_adds_and_status_uses_exact_core_report_counts(self) -> None:
         self.window._add_dataset_row(
             _axis_grid([0.0, 1.0], 1.0), "First", "Loaded", ""
@@ -655,14 +796,14 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
         )
         self._select_rows_in_order(0, 1)
 
-        with mock.patch("GRIM_Backend.ui.dataset_actions.StitchDialog") as dialog_type:
+        with mock.patch("GRIM_Backend.ui.dataset_actions.JoinDialog") as dialog_type:
             dialog = dialog_type.return_value
             dialog.exec.return_value = QDialog.Accepted
             dialog.get_params.return_value = {
                 "policy": "priority-first",
                 "tol": 1.0e-6,
             }
-            self.window._stitch_selected_datasets()
+            self.window.btn_join.click()
             self._wait_for_background()
 
         status = self.window.status.currentMessage()
@@ -1037,13 +1178,18 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
                 [[[100.0]], [[40.0]]],
             ]
         )
+        base_power = (
+            base_power
+            * np.asarray([1.0, 2.0]).reshape(1, 1, 2, 1)
+            * np.asarray([1.0, 3.0]).reshape(1, 1, 1, 2)
+        )
         for name, scale in (("First", 1.0), ("Second", 2.0)):
             power = scale * base_power
             dataset = RcsGrid(
                 azimuths,
                 [-5.0, 5.0],
-                [10.0],
-                ["VV"],
+                [9.0, 10.0],
+                ["VV", "HH"],
                 rcs_power=power,
                 rcs_phase=np.zeros_like(power),
                 units={
@@ -1054,32 +1200,38 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
                     "rcs_linear_quantity": "sigma_3d",
                 },
             )
-            self.window._add_dataset_row(dataset, name, "Loaded", "")
+            self._add_saved_fixture(dataset, name)
         self._select_rows_in_order(0, 1)
 
         with mock.patch(
             "GRIM_Backend.ui.dataset_actions.QInputDialog.getDouble",
             return_value=(90.0, True),
         ) as prompt:
-            self.window._percentile_selected()
+            self.window.btn_percentile.click()
             self._wait_for_background()
 
         self.assertEqual(prompt.call_args.args[3], 90.0)
         self.assertEqual(self.window.table.rowCount(), 4)
         for row, scale in ((2, 1.0), (3, 2.0)):
             result = self.window.table.item(row, 0).data(Qt.UserRole)
-            self.assertEqual(result.rcs_power.shape, (4, 2, 1, 1))
-            np.testing.assert_allclose(result.azimuths, azimuths)
+            self.assertEqual(result.rcs_power.shape, (1, 2, 2, 2))
+            np.testing.assert_allclose(result.azimuths, [np.mean(azimuths)])
+            np.testing.assert_array_equal(result.elevations, [-5.0, 5.0])
+            np.testing.assert_array_equal(result.frequencies, [9.0, 10.0])
+            np.testing.assert_array_equal(result.polarizations, ["VV", "HH"])
             expected = np.nanpercentile(
-                scale * base_power[:, :, 0, 0],
+                scale * base_power,
                 90.0,
                 axis=0,
                 keepdims=True,
             )
             np.testing.assert_allclose(
-                result.rcs_power[:, :, 0, 0],
-                np.broadcast_to(expected, (azimuths.size, expected.shape[1])),
+                result.rcs_power,
+                expected,
             )
+            original = self.window.table.item(row - 2, 0).data(Qt.UserRole)
+            np.testing.assert_array_equal(original.rcs_power, scale * base_power)
+            self.assertEqual(original.rcs_power.nbytes // result.rcs_power.nbytes, 4)
             self.assertTrue(np.all(np.isnan(result.rcs_phase)))
             self.assertIn("[p90 az]", self.window.table.item(row, 0).text())
         self.assertIn(
@@ -1090,6 +1242,16 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
             "p90 statistics on linear power",
             self.window.python_recorder.script,
         )
+        self.assertIn("broadcast_reduced=False", self.window.python_recorder.script)
+        replayed_outputs = [
+            dataset for dataset in self._replay_recorded_datasets()
+            if "statistics_reduction_json" in dataset.extra
+        ]
+        self.assertEqual(len(replayed_outputs), 2)
+        for replayed, row in zip(replayed_outputs, (2, 3)):
+            result = self.window.table.item(row, 0).data(Qt.UserRole)
+            np.testing.assert_allclose(replayed.rcs_power, result.rcs_power)
+            self.assertEqual(replayed.rcs_power.shape, (1, 2, 2, 2))
 
     def test_dataset_add_runs_off_the_gui_thread(self) -> None:
         left = _axis_grid([0.0, 1.0], 1.0)

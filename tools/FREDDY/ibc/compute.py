@@ -30,6 +30,13 @@ class MaterialTable:
     mu_r: list[complex]
 
 
+@dataclass(frozen=True)
+class ConstantMaterial:
+    """An isotropic, frequency-independent medium; no synthetic coverage range."""
+    eps_r: complex
+    mu_r: complex
+
+
 @dataclass
 class LayerConfig:
     thickness_in: float
@@ -49,6 +56,26 @@ class LayerConfig:
     inv_rs_min: float | None = None  # ohms/square
     inv_rs_max: float | None = None  # ohms/square
     inv_rs_accuracy: float | None = None  # snap resistance to this increment (ohms)
+    material_source: str = "file"
+    constant_eps_real: float = 1.0
+    constant_eps_imag: float = 0.0
+    constant_mu_real: float = 1.0
+    constant_mu_imag: float = 0.0
+    # Per-layer manufacturing inputs; independent of the nominal physics.
+    tolerances: dict = field(default_factory=dict)
+
+    @property
+    def is_constant(self) -> bool:
+        return self.material_source == "constant"
+
+
+def layer_material_label(layer: LayerConfig) -> str:
+    if layer.is_constant:
+        eps = complex(layer.constant_eps_real, layer.constant_eps_imag)
+        mu = complex(layer.constant_mu_real, layer.constant_mu_imag)
+        return f"Constant εr={eps:g}, μr={mu:g}"
+    from pathlib import Path
+    return Path(layer.file_0deg).name or "Material"
 
 
 @dataclass
@@ -56,8 +83,8 @@ class LoadedLayer:
     thickness_m: float
     anisotropic: bool
     polarization_deg: float
-    table_0deg: MaterialTable | None
-    table_90deg: MaterialTable | None
+    table_0deg: MaterialTable | ConstantMaterial | None
+    table_90deg: MaterialTable | ConstantMaterial | None
     is_sheet: bool = False
     sheet_resistance: float = 0.0
 
@@ -806,7 +833,10 @@ def interp_complex_many(x: list[float], xp: list[float], fp: list[complex]) -> l
     return [interp_complex(v, xp, fp) for v in x]
 
 
-def validate_sweep_coverage(sweep: list[float], table: MaterialTable, label: str) -> None:
+def validate_sweep_coverage(sweep: list[float], table: MaterialTable | ConstantMaterial, label: str) -> None:
+    if isinstance(table, ConstantMaterial):
+        _validate_frequency_vector(sweep)
+        return
     if sweep[0] < table.freq_ghz[0] or sweep[-1] > table.freq_ghz[-1]:
         raise ValueError(
             f"Sweep [{sweep[0]}, {sweep[-1]}] GHz is outside {label} data range "
@@ -913,6 +943,8 @@ def is_nominal_scale(t_scale: float, e_scale: float, m_scale: float, tol: float 
 
 
 def layer_properties(layer: LoadedLayer, f_ghz: float) -> tuple[complex, complex]:
+    if isinstance(layer.table_0deg, ConstantMaterial):
+        return layer.table_0deg.eps_r, layer.table_0deg.mu_r
     eps_0 = interp_complex(f_ghz, layer.table_0deg.freq_ghz, layer.table_0deg.eps_r)
     mu_0 = interp_complex(f_ghz, layer.table_0deg.freq_ghz, layer.table_0deg.mu_r)
     if not layer.anisotropic:
@@ -925,6 +957,8 @@ def layer_properties(layer: LoadedLayer, f_ghz: float) -> tuple[complex, complex
 
 
 def layer_properties_many(layer: LoadedLayer, f_ghz: list[float]) -> tuple[list[complex], list[complex]]:
+    if isinstance(layer.table_0deg, ConstantMaterial):
+        return [layer.table_0deg.eps_r] * len(f_ghz), [layer.table_0deg.mu_r] * len(f_ghz)
     eps_0 = interp_complex_many(f_ghz, layer.table_0deg.freq_ghz, layer.table_0deg.eps_r)
     mu_0 = interp_complex_many(f_ghz, layer.table_0deg.freq_ghz, layer.table_0deg.mu_r)
     if not layer.anisotropic:
@@ -1489,7 +1523,13 @@ def compute_angle_metrics_many(
     *,
     prepared_properties: list[tuple[list[complex], list[complex]] | None] | None = None,
     prepared_wave_terms: list[tuple["np.ndarray", "np.ndarray"] | None] | None = None,
-) -> dict[str, list[float]]:
+    return_arrays: bool = False,
+) -> dict[str, list[float] | "np.ndarray"]:
+    """Frequency-vector metrics; array output avoids boxing dense GUI sweeps.
+
+    The public default remains lists. Without NumPy the scalar fallback also
+    returns lists, which both consumers can assign into their output grids.
+    """
     if not f_ghz:
         return {
             "metal_loss_db": [],
@@ -1594,16 +1634,17 @@ def compute_angle_metrics_many(
     metal_abs_frac = 1.0 - np.abs(gamma_metal) ** 2
     air_abs_frac = 1.0 - np.abs(gamma_air) ** 2 - transmission_power
 
-    return {
-        "metal_loss_db": _db_from_mag_many(gamma_metal).tolist(),
-        "metal_phase_deg": np.degrees(np.angle(gamma_metal)).tolist(),
-        "air_loss_db": _db_from_mag_many(gamma_air).tolist(),
-        "air_phase_deg": np.degrees(np.angle(gamma_air)).tolist(),
-        "insertion_loss_db": insertion_loss_db.tolist(),
-        "insertion_phase_deg": insertion_phase_deg.tolist(),
-        "metal_absorption_db": _db_from_power_many(metal_abs_frac).tolist(),
-        "air_absorption_db": _db_from_power_many(air_abs_frac).tolist(),
+    metrics = {
+        "metal_loss_db": _db_from_mag_many(gamma_metal),
+        "metal_phase_deg": np.degrees(np.angle(gamma_metal)),
+        "air_loss_db": _db_from_mag_many(gamma_air),
+        "air_phase_deg": np.degrees(np.angle(gamma_air)),
+        "insertion_loss_db": insertion_loss_db,
+        "insertion_phase_deg": insertion_phase_deg,
+        "metal_absorption_db": _db_from_power_many(metal_abs_frac),
+        "air_absorption_db": _db_from_power_many(air_abs_frac),
     }
+    return metrics if return_arrays else {key: values.tolist() for key, values in metrics.items()}
 
 
 def compute_angle_metrics(

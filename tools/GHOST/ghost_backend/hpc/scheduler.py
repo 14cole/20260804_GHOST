@@ -318,6 +318,27 @@ def predict_2d_resources_many(
     unsupported unit cannot enter a sweep with a zero-GB reservation.
     """
 
+    from ghost_backend.execution.options import current_options, execution_scope
+    settings = current_options()
+    if settings is not None and settings['factorization'] == 'adaptive':
+        from ghost_backend.geometry.io import parse_geometry, build_geometry_snapshot
+        from ghost_backend.execution.selection import select_backend
+        from ghost_backend.twod.preparation import preparation_scope
+        path = Path(geometry_path)
+        title, segments, ibcs, dielectrics = parse_geometry(path.read_text())
+        snapshot = build_geometry_snapshot(title, segments, ibcs, dielectrics)
+        with preparation_scope():
+            selection = select_backend(dict(geometry_snapshot=snapshot, material_base_dir=str(path.parent),
+                geometry_units=geometry_units, frequencies_ghz=list(frequencies_ghz), elevations_deg=[0.]*n_angles,
+                solver_method=solver_method, max_panels=max_panels,
+                mesh_convergence_policy={'fine_factor': fine_factor}), settings, certified=fine_factor > 1)
+            with execution_scope(dict(settings, factorization=selection['selected'])):
+                result = predict_2d_resources_many(geometry_path, frequencies_ghz, polarizations, geometry_units,
+                    max_panels, fine_factor, n_angles, safety, floor_gb, progress, solver_method)
+        for record in result.values():
+            record['backend_selection'] = selection
+        return result
+
     import ghost_backend.twod.solver as rcs_solver
     from ghost_backend.geometry.io import parse_geometry, build_geometry_snapshot
     from ghost_backend.runs.quality import scale_snapshot_panel_density

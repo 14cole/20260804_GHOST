@@ -16,6 +16,8 @@ operations or numerical work.
 | `GRIM_Backend/datasets/audit.py` | Non-mutating dataset health diagnostics, with bounded array scans and the existing `RcsGrid.audit()` API. |
 | `GRIM_Backend/io/native.py`, `cst.py`, `sentri.py`, `out.py`, `pioneer.py`, `ptm.py`, `xpatch.py` | Native archive loading and format-specific adapters inherited by `RcsGrid`. Preserve classmethod dispatch, allocation checks, metadata, and existing reader/writer signatures. |
 | `GRIM_Backend/ui/dataset_dialogs.py` | Dataset operation dialogs and input-unit presentation. |
+| `GRIM_Backend/ui/table_import.py`, `io/mapped_table.py` | Adapt the shared column editor and normalized rows into RCS grids using the existing CSV validation and memory admission. |
+| `tools/FREDDY/ibc/table_conversion.py`, `converter_dialog.py` | Qt-free streaming text parsing, explicit unit conversion, atomic table export, and the shared column editor. GRIM loads the authoritative editor through its private FREDDY package. |
 | `GRIM_Backend/execution/dataset_jobs.py` | Background workers, loader memory admission, and bounded parallel loading. |
 | `GRIM_Backend/io/batch.py` | Atomic GRIM/CSV staging, rollback, and compression policy. |
 | `GRIM_Backend/assembly/values.py` | Shared Qt-free form values and loaded recipe records. |

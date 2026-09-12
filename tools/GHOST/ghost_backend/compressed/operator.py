@@ -6,24 +6,47 @@ from ghost_backend.linalg.sweep import _qr_basis
 from ghost_backend.linalg.hierarchical import spatial_order
 
 
-def tile_payload(raw, tail, tolerance, method):
+def tile_payload(raw, tail, tolerance, method, probe=True):
     """Local scope releases decomposition work before assembling the next tile."""
     if not np.any(raw):
         return (np.empty((len(raw),0),complex), np.empty((0,raw.shape[1]),complex)), raw, tail, True
+    norm = max(float(np.linalg.norm(raw)), 1e-300)
+    # Strict storage break-even; reject before generating a useless full Q.
+    rank_limit = (raw.size - 1) // sum(raw.shape)
+    reconstructed = difference = None
     if method == 'qr':
-        left, right = _qr_basis(raw, tolerance*max(float(np.linalg.norm(raw)),1e-300))
+        left = right = None
+        if probe and min(raw.shape) >= 128:
+            # Distant smooth blocks usually fit a small sampled column space.
+            # This only proposes a basis: the full original tile is verified.
+            ids = np.linspace(0, raw.shape[1]-1, 16).astype(int)
+            candidate, _ = _qr_basis(raw[:, ids], tolerance * norm)
+            recovery = candidate.conj().T @ raw
+            proposed = candidate @ recovery
+            proposal_error = abs(raw - proposed)
+            if np.linalg.norm(proposal_error) <= tolerance * norm:
+                left, right = candidate, recovery
+                reconstructed, difference = proposed, proposal_error
+            candidate = recovery = proposed = proposal_error = None
+        if left is None:
+            left, right = _qr_basis(raw, tolerance * norm, max_rank=rank_limit)
+        if left is None:
+            return (raw,None), raw, tail, False
     else:
         u,s,v=la.svd(raw,full_matrices=False,check_finite=False)
         energy=np.sqrt(np.cumsum(s[::-1]**2)[::-1])
         rank=int(np.count_nonzero(energy>tolerance*max(np.linalg.norm(s),1e-300)))
+        if rank > rank_limit:
+            return (raw,None), raw, tail, False
         left=u[:,:rank].copy();right=(s[:rank,None]*v[:rank]).copy()
     if left.nbytes+right.nbytes >= raw.nbytes:
         return (raw,None), raw, tail, False
-    reconstructed=left@right
-    difference=abs(raw-reconstructed)
+    if reconstructed is None:
+        reconstructed=left@right
+        difference=abs(raw-reconstructed)
 
 
-    if np.linalg.norm(difference)>tolerance*max(float(np.linalg.norm(raw)),1e-300):
+    if np.linalg.norm(difference)>tolerance*norm:
         return (raw,None), raw, tail, False
     tail+=difference
     return (left,right), reconstructed, tail, True
@@ -53,10 +76,12 @@ class StreamedOperator:
             ids=pending.pop()
             if len(ids)<=tile:self.groups.append(ids)
             else:pending.extend((ids[len(ids)//2:],ids[:len(ids)//2]))
+        self.group_bounds = np.asarray([(self.coordinates[ids].min(axis=0), self.coordinates[ids].max(axis=0))
+                                        for ids in self.groups])
         self.group_id=np.empty(self.n,int);self.local_id=np.empty(self.n,int)
         for i,ids in enumerate(self.groups):self.group_id[ids]=i;self.local_id[ids]=np.arange(len(ids))
         self.bytes=sum(a.nbytes for a in (order,self.group_id,self.local_id,self.row_error,self.row_norm,
-                                        self.column_error,self.column_norm,self.row_max,self.coordinates))
+                                        self.column_error,self.column_norm,self.row_max,self.coordinates,self.group_bounds))
         if self.bytes>budget:raise MemoryError('Compressed operator exceeded its retained-storage cap.')
         self.compressed=0;self.peak_tile=0;self.tolerance=tolerance;self.compression=compression;self.budget=budget
         if not assemble:return
@@ -72,6 +97,13 @@ class StreamedOperator:
                 raw=tail=payload=None
         self.finalize(oracle)
 
+    def separated(self, i, j):
+        """Attempt a sampled basis only for spatially separated groups."""
+        a, b = self.group_bounds[i], self.group_bounds[j]
+        gap = np.maximum(0., np.maximum(a[0]-b[1], b[0]-a[1]))
+        diameter = max(np.linalg.norm(a[1]-a[0]), np.linalg.norm(b[1]-b[0]))
+        return np.linalg.norm(gap) > .5 * diameter
+
     def add_tile(self,i,j,raw,tail):
         self.checkpoint()
         rows,cols=self.groups[i],self.groups[j]
@@ -82,7 +114,7 @@ class StreamedOperator:
             raise ValueError('Oracle returned invalid coefficients or error bounds.')
         payload=(raw,None)
         if i!=j:
-            payload,raw,tail,accepted=tile_payload(raw,tail,self.tolerance,self.compression)
+            payload,raw,tail,accepted=tile_payload(raw,tail,self.tolerance,self.compression,probe=self.separated(i,j))
             self.compressed+=int(accepted)
         magnitude=abs(raw)
         self.row_norm[rows]+=np.sum(magnitude,axis=1)

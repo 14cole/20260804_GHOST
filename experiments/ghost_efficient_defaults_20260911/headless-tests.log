@@ -1,7 +1,0 @@
-...............................................................................................
-----------------------------------------------------------------------
-Ran 95 tests in 36.974s
-
-OK
-GHOST GUI dependencies: OK
-gc:0: ResourceWarning: gc: 1 uncollectable objects at shutdown; use gc.set_debug(gc.DEBUG_UNCOLLECTABLE) to list them

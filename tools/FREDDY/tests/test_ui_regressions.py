@@ -63,9 +63,8 @@ class MaterialMixUiTests(unittest.TestCase):
                 self.app.processEvents()
                 self.assertTrue(workspace.layers_group.isVisible())
                 self.assertEqual(workspace.results_pane.isVisible(), results_were_visible)
-            guide = " ".join(
-                label.text() for label in workspace.mode_stack.widget(about_index).findChildren(QLabel)
-            )
+            workspace.guide.open_topic('physics')
+            guide = workspace.guide.browser.toPlainText()
             for content in ("Physical scope", "Angles and polarization", "GHOST VV with FREDDY TM",
                             "Material variables", "PEC-backed absorbed power", "Optimization quick start"):
                 self.assertIn(content, guide)

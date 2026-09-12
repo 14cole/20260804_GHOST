@@ -205,8 +205,8 @@ python tools/GHOST/ghost_backend/hpc/bundle.py verify coated_request
 For BoR, use `--solver bor`, `--geometry BOR=/path/to/coated_bor.geo`, remove
 `LU_PRECISION`, and specify the required `ELEVATIONS_DEG` and body attitude.
 Transfer the complete request folder, then use the Linux stage command below.
-GUI Solver-tab choices are separate from the Runs request settings: explicit
-request settings determine the cluster run.
+Explicit request settings determine the cluster run. To reuse saved GHOST
+choices in a driver configuration, embed the setup as `run_setup`.
 
 The request contains inputs/settings, not the solver implementation. Install
 the matching updated GHOST backend and numerical dependencies on the cluster.
@@ -221,10 +221,10 @@ submit. `ghost_backend.hpc.common.configure_driver` copies the driver source
 and writes an adjacent validated JSON configuration. Submission copies both
 files into the run directory for the compute nodes.
 
-### Portable requests from GRIM on Windows
+### Portable requests from Windows
 
-GRIM may export a portable request folder for upload by SFTP, or upload that
-same folder and invoke the Linux stager over SSH. The folder contains only
+Use the bundle CLI commands above to create and verify a portable request
+folder, then transfer it through your usual SSH/SFTP workflow. The folder contains only
 relative geometry/material inputs, declarative allowlisted settings, hashes,
 and a human-readable `README.txt`. It is intentionally **not** a completed HPC
 run: final absolute paths, configured driver bytes, and solver/runtime
@@ -241,20 +241,19 @@ Use the matching Linux GHOST checkout for `/path/to/GHOST`. Omit `--submit` to
 build the run and SLURM scripts without calling `sbatch`; omit `--run-driver`
 as well to verify and stage the inputs only. The command prints one JSON object
 with the stage directory, run directory, log file, and any detected SLURM job
-IDs so GRIM can reconnect without treating an SSH session as the lifetime of
-the compute job.
+IDs for subsequent inspection and recovery. The compute jobs continue after
+the SSH session disconnects.
 
-Direct GRIM submissions assign the bundle ID before transfer, so the result is
-always expected at `<workspace-root>/grim_<bundle-id>/stage_result.json`. If
-the SSH connection ends after one or more `sbatch` calls, do not press submit
-again: select the tracked run and use **Refresh**. Each successful `sbatch`
-job ID is also written atomically to the run's `submitted_jobs.json`, allowing
-partial multi-script submissions to be recovered even when a later script
-fails. GRIM's **Remote Python** field may be `python3` or an absolute
-virtual-environment interpreter path; that interpreter becomes the configured
-driver's compute-node `PYTHON_EXE`.
+The request contains a bundle ID, and the staging result is written to
+`<workspace-root>/grim_<bundle-id>/stage_result.json`. If the SSH connection
+ends during submission, recover this result before considering a resubmission.
+Each successful `sbatch` job ID is also written atomically to the run's
+`submitted_jobs.json`, allowing partial multi-script submissions to be
+recovered even when a later script fails. Invoke the stager with the cluster's
+virtual-environment interpreter when needed; that interpreter becomes the
+configured driver's compute-node `PYTHON_EXE`.
 
-The same read-only recovery can be inspected manually:
+Inspect the submission with read-only recovery:
 
 ```bash
 python3 /path/to/GHOST/ghost_backend/hpc/bundle.py recover \
@@ -1015,8 +1014,8 @@ to compare against; keep one outside the tree.
   picked up.
 ## Saved 2D resources
 
-GHOST and GRIM Runs export validated factorization/resource profiles into 2D
-requests and manifests. Workers apply the captured settings independently of
+GHOST saves validated factorization/resource profiles. Local/HPC driver
+configurations carry these settings into 2D requests and manifests. Workers apply the captured settings independently of
 their launch environment. See [run profiles](RUN_PROFILES.md) for JSON examples,
 temporary directory portability, CPU reservations, and performance checks.
 Install the updated HPC requirements, including `threadpoolctl==2.2.0` for the

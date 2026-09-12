@@ -127,8 +127,12 @@ from ghost_backend.runs.config import (
     configuration_source_records,
     copy_configuration,
 )
+from ghost_backend.bor.options import validate_options as validate_bor_options
+BOR_EXECUTION_OPTIONS = validate_bor_options({})
+
 _CONFIG_KIND = 'bor'
 _CONFIG_KEYS = (
+    'BOR_EXECUTION_OPTIONS',
     'GEOMETRY_DIRS',
     'FREQUENCIES_GHZ',
     'AZIMUTHS_DEG',
@@ -154,6 +158,7 @@ _CONFIG_KEYS = (
     'TASKS_PER_CHILD',
 )
 _ACTIVE_CONFIG_PATH = load_driver_configuration(globals(), __file__, _CONFIG_KIND, _CONFIG_KEYS)
+BOR_EXECUTION_OPTIONS = validate_bor_options(BOR_EXECUTION_OPTIONS)
 
 
 MANIFEST_SCHEMA = "ghost.local.bor-run.v2"
@@ -377,6 +382,7 @@ def _solve_and_export(
         table_precision=context["table_precision"],
         assembly=context["assembly"],
         stream_budget_gb=context["stream_budget_gb"],
+        bor_options=context.get("bor_execution_options", {}),
         expand_to_360=context["expand_to_360"],
         **quality_kwargs,
     )
@@ -455,6 +461,7 @@ def _plan(
             table_precision=TABLE_PRECISION,
             assembly=ASSEMBLY,
             stream_budget_gb=STREAM_BUDGET_GB,
+            bor_options=BOR_EXECUTION_OPTIONS,
             mesh_certification=bool(MESH_CERTIFICATION),
             fine_factor=float(accuracy_target_policy(ACCURACY_TARGET)["fine_factor"]),
         )
@@ -568,6 +575,7 @@ def main() -> 'None':
         "assembly": ASSEMBLY,
         "table_precision": TABLE_PRECISION,
         "stream_budget_gb": float(STREAM_BUDGET_GB),
+        "bor_execution_options": dict(BOR_EXECUTION_OPTIONS),
         "expand_to_360": False,
         "mesh_certification": bool(MESH_CERTIFICATION),
         "accuracy_target": ACCURACY_TARGET,
@@ -621,6 +629,7 @@ def main() -> 'None':
         "assembly": ASSEMBLY,
         "table_precision": TABLE_PRECISION,
         "stream_budget_gb": float(STREAM_BUDGET_GB),
+        "bor_execution_options": dict(BOR_EXECUTION_OPTIONS),
         "expand_to_360": False,
         "mesh_certification": bool(MESH_CERTIFICATION),
         "mesh_convergence_policy": mesh_policy,

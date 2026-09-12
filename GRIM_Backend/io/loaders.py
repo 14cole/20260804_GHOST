@@ -17,12 +17,20 @@ SUPPORTED_EXTENSIONS = (
     ".csv",
     ".cst_data",
     ".txt",
+    ".dat",
+    ".asc",
+    ".ascii",
+    ".tsv",
     ".out",
     ".pio",
     ".cmplx_di",
     ".ptm",
     ".ss",
 )
+
+
+class UnrecognizedTableError(ValueError):
+    """No standard reader recognized a text table; the GUI may offer mapping."""
 
 
 def is_supported_path(path: str) -> bool:
@@ -93,7 +101,9 @@ def load_dataset(path: str, *, allow_legacy_pickle=False) -> RcsGrid:
             return loader(path)
         except Exception as exc:
             errors.append(f"{loader.__name__}: {exc}")
-    raise ValueError("; ".join(errors))
+    error_type = (UnrecognizedTableError if lower.endswith(
+        (".csv", ".txt", ".dat", ".asc", ".ascii", ".tsv")) else ValueError)
+    raise error_type("; ".join(errors))
 
 
 def _matching_dataset_paths(folder: str, *, pattern="*", recursive=False):

@@ -114,6 +114,3 @@ the complete response into memory.
 The supplied [13-case template](tools/GHOST/ghost_backend/validation/feature_family_studies/study.template.json)
 is ready for reference datasets, but **none of these new cases is physically
 validated yet**. Follow the [study instructions](tools/GHOST/ghost_backend/validation/feature_family_studies/README.md).
-
-See [implementation and validation results](SOLVER_IMPROVEMENT_PLAN.md) for
-measured gains, tests and remaining work.

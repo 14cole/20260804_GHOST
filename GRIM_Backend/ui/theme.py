@@ -141,13 +141,11 @@ def build_qss(palette: Mapping[str, object]) -> str:
     QScrollArea#featureLineScroll,
     QScrollArea#featureReviewScroll {{ background: {palette['panel_bg']}; border: none; }}
     QScrollArea#plotSettingsScroll {{ background: {palette['panel_bg']}; border: none; }}
-    QScrollArea#runsControlsScroll, QScrollArea#pptControlsScroll,
+    QScrollArea#pptControlsScroll,
     QScrollArea#ghostSolverControlsScroll, QScrollArea#freddyWorkspaceScroll {{
         background: {palette['panel_bg']}; border: none;
     }}
-    QScrollArea#runsControlsScroll > QWidget,
     QScrollArea#pptControlsScroll > QWidget,
-    QWidget#runsControlsContent,
     QWidget#ghostSolverControlsContent,
     QWidget#pptControlsContent {{ background: {palette['panel_bg']}; }}
     QWidget#featureAssemblyContent {{ background: {palette['panel_bg']}; }}

@@ -11,7 +11,21 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable, Iterable, Iterator, TextIO
 
-from .compute import LayerConfig, MaterialTable
+from .compute import LayerConfig, MaterialTable, ConstantMaterial
+
+CONSTANT_VALUE_FIELDS = ('constant_eps_real', 'constant_eps_imag', 'constant_mu_real', 'constant_mu_imag')
+
+
+def constant_material_from_layer(layer: LayerConfig) -> ConstantMaterial:
+    if not layer.is_constant or layer.is_sheet or layer.anisotropic:
+        raise ValueError('Constant ε/μ requires an isotropic bulk layer.')
+    try:
+        er, ei, mr, mi = (float(getattr(layer, key)) for key in CONSTANT_VALUE_FIELDS)
+    except (TypeError, ValueError):
+        raise ValueError('Constant ε/μ components must be numeric.') from None
+    eps, mu = complex(er, ei), complex(mr, mi)
+    _validate_medium(eps, mu, 'Constant material')
+    return ConstantMaterial(eps, mu)
 
 MATERIAL_HEADER = "frequency_hz,eps_real,eps_imag,mu_real,mu_imag"
 IMPEDANCE_HEADER = "frequency_hz,resistance_ohm,reactance_ohm"
@@ -42,7 +56,7 @@ HZ_PER_GHZ = 1e9
 
 
 @contextmanager
-def _atomic_text_file(path: Path) -> Iterator[TextIO]:
+def _atomic_text_file(path: Path, *, newline: str | None = None) -> Iterator[TextIO]:
     """Yield a same-directory temporary text file and atomically publish it.
 
     Keeping the temporary file beside the destination makes ``os.replace`` an
@@ -60,7 +74,7 @@ def _atomic_text_file(path: Path) -> Iterator[TextIO]:
     temporary_path = Path(temporary_name)
     fd_needs_close = True
     try:
-        stream = os.fdopen(fd, "w", encoding="utf-8")
+        stream = os.fdopen(fd, "w", encoding="utf-8", newline=newline)
         fd_needs_close = False
         with stream:
             yield stream
@@ -550,6 +564,7 @@ def write_material_table(path: Path, table: MaterialTable) -> None:
 
 
 def layer_config_to_dict(layer: LayerConfig) -> dict[str, Any]:
+    from .tolerance_config import validate_tolerances
     d: dict[str, Any] = {
         "thickness_in": layer.thickness_in,
         "anisotropic": layer.anisotropic,
@@ -557,6 +572,10 @@ def layer_config_to_dict(layer: LayerConfig) -> dict[str, Any]:
         "file_90deg": layer.file_90deg,
         "polarization_deg": layer.polarization_deg,
     }
+    if layer.is_constant:
+        constant_material_from_layer(layer)
+        d.update(material_source='constant', file_0deg='', file_90deg='')
+        d.update({key: float(getattr(layer, key)) for key in CONSTANT_VALUE_FIELDS})
     if layer.is_sheet:
         d["is_sheet"] = True
         d["sheet_resistance"] = layer.sheet_resistance
@@ -572,6 +591,8 @@ def layer_config_to_dict(layer: LayerConfig) -> dict[str, Any]:
         d["inv_t_max_in"] = layer.inv_t_max_in
     if layer.inv_t_accuracy_in is not None:
         d["inv_t_accuracy_in"] = layer.inv_t_accuracy_in
+    if layer.tolerances:
+        d['tolerances'] = validate_tolerances(layer.tolerances, layer.is_sheet)
     return d
 
 
@@ -598,9 +619,16 @@ def _validate_search_bounds(
 
 
 def layer_config_from_dict(data: dict[str, Any], index: int = 0) -> LayerConfig:
+    from .tolerance_config import validate_tolerances
     label = f"Layer {index}" if index > 0 else "Layer"
 
     is_sheet = bool(data.get("is_sheet", False))
+    tolerances = validate_tolerances(data.get('tolerances', {}), is_sheet)
+    source = str(data.get('material_source', 'file'))
+    if source not in ('file', 'constant'):
+        raise ValueError(f'{label}: material_source must be file or constant.')
+    if source == 'constant' and (is_sheet or bool(data.get('anisotropic', False))):
+        raise ValueError(f'{label}: constant ε/μ requires an isotropic bulk layer.')
     if is_sheet:
         try:
             sheet_resistance = float(data.get("sheet_resistance", 0.0))
@@ -625,6 +653,7 @@ def layer_config_from_dict(data: dict[str, Any], index: int = 0) -> LayerConfig:
             inv_rs_min=inv_rs_min,
             inv_rs_max=inv_rs_max,
             inv_rs_accuracy=inv_rs_accuracy,
+            tolerances=tolerances,
         )
 
     try:
@@ -654,7 +683,7 @@ def layer_config_from_dict(data: dict[str, Any], index: int = 0) -> LayerConfig:
                 "polarization_deg of 0 or 90."
             )
 
-    if not file_0deg:
+    if not file_0deg and source == 'file':
         raise ValueError(f"{label}: file_0deg is required.")
     if anisotropic and not file_90deg:
         raise ValueError(f"{label}: file_90deg is required for anisotropic layers.")
@@ -666,7 +695,16 @@ def layer_config_from_dict(data: dict[str, Any], index: int = 0) -> LayerConfig:
     )
     _validate_search_bounds(inv_t_min_in, inv_t_max_in, inv_t_accuracy_in, label, "inv_t")
 
-    return LayerConfig(
+    constant_values = {}
+    if source == 'constant':
+        for key in CONSTANT_VALUE_FIELDS:
+            if key not in data:
+                raise ValueError(f'{label}: {key} is required for a constant material.')
+            constant_values[key] = _parse_optional_float(data[key], label, key)
+            if constant_values[key] is None:
+                raise ValueError(f'{label}: {key} must be numeric.')
+        file_0deg = file_90deg = ''
+    layer = LayerConfig(
         thickness_in=thickness_in,
         anisotropic=anisotropic,
         file_0deg=file_0deg,
@@ -675,7 +713,13 @@ def layer_config_from_dict(data: dict[str, Any], index: int = 0) -> LayerConfig:
         inv_t_min_in=inv_t_min_in,
         inv_t_max_in=inv_t_max_in,
         inv_t_accuracy_in=inv_t_accuracy_in,
+        material_source=source,
+        tolerances=tolerances,
+        **constant_values,
     )
+    if layer.is_constant:
+        constant_material_from_layer(layer)
+    return layer
 
 
 def _parse_optional_float(value: Any, label: str, field: str) -> float | None:
@@ -699,6 +743,8 @@ def _project_path_slots(
     if isinstance(layers, list):
         for index, layer in enumerate(layers):
             if not isinstance(layer, dict):
+                continue
+            if layer.get('material_source') == 'constant':
                 continue
             for key in ("file_0deg", "file_90deg"):
                 if key in layer:

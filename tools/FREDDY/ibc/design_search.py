@@ -42,7 +42,8 @@ from .compute import (
     validate_sweep_coverage,
     weight_fractions_from_volume,
 )
-from .io import read_material_table
+from .io import read_material_table, constant_material_from_layer
+from .ui_options import inverse_requirement_target
 from .inverse_workflow import StopInverseSearch, search_identity
 from .inverse_grid import DesignGrid
 
@@ -50,10 +51,12 @@ from .inverse_grid import DesignGrid
 def score_inverse_candidate(target_freqs, target_angles, candidate_layers, wave_pol,
                             scales, score_mode, prepared_wave_terms=None, *,
                             stop_requested, statistics,
-                            compute_metrics=compute_angle_metrics_many):
+                            compute_metrics=compute_angle_metrics_many, requirement_db=-10.):
     """Score a complete candidate, observing cancellation between responses."""
     corner_means: list[float] = []
     nominal_mean: float | None = None
+    requirement_db = inverse_requirement_target(score_mode, requirement_db)
+    worst_point = -math.inf
     for t_scale, e_scale, m_scale in scales:
         values: list[float] = []
         for angle_deg in target_angles:
@@ -76,6 +79,7 @@ def score_inverse_candidate(target_freqs, target_angles, candidate_layers, wave_
             )
             values.extend(metrics["metal_loss_db"])
         mean_db, _mn, _mx = statistics(values)
+        worst_point = max(worst_point, _mx)
         corner_means.append(mean_db)
         if abs(t_scale - 1.0) < 1e-12 and abs(e_scale - 1.0) < 1e-12 and abs(m_scale - 1.0) < 1e-12:
             nominal_mean = mean_db
@@ -89,6 +93,10 @@ def score_inverse_candidate(target_freqs, target_angles, candidate_layers, wave_
     avg_mean = sum(corner_means) / len(corner_means)
     best_mean = min(corner_means)
     score_db = worst_mean if "worst" in score_mode.lower() else avg_mean
+    if requirement_db is not None:
+        # A minimax score: negative/zero gap passes every analyzed condition.
+        # Retain the legacy mean diagnostics separately from this objective.
+        score_db = worst_point - requirement_db
     return score_db, nominal_mean, worst_mean, avg_mean, best_mean
 
 
@@ -108,6 +116,7 @@ class InverseSearchRequest:
     a_start: float
     a_stop: float
     numpy_available: bool
+    requirement_db: float = -10.
 
 
 def run_inverse_search(request: InverseSearchRequest, *, stop_requested, progress,
@@ -122,6 +131,7 @@ def run_inverse_search(request: InverseSearchRequest, *, stop_requested, progres
     wave_pol = request.wave_pol
     uncertainty_cfg = request.uncertainty_cfg
     score_mode = request.score_mode
+    requirement_db = inverse_requirement_target(score_mode, request.requirement_db)
     checkpoint = request.checkpoint
     grid = request.grid
     top_n = request.top_n
@@ -133,7 +143,7 @@ def run_inverse_search(request: InverseSearchRequest, *, stop_requested, progres
     from array import array
     import heapq
     identity = search_identity(layer_snapshot, target_freqs, target_angles, wave_pol,
-                               uncertainty_cfg, score_mode)
+                               uncertainty_cfg, score_mode, requirement_db)
     if checkpoint and checkpoint['identity'] != identity:
         raise ValueError("Inputs or material files changed. Start a new analysis instead of resuming.")
     def check_stop():
@@ -158,7 +168,7 @@ def run_inverse_search(request: InverseSearchRequest, *, stop_requested, progres
                 tables_0_local.append(None)
                 tables_90_local.append(None)
                 continue
-            table_0 = get_table(chosen_files[i - 1])
+            table_0 = constant_material_from_layer(layer) if layer.is_constant else get_table(chosen_files[i - 1])
             try:
                 validate_sweep_coverage(
                     target_freqs, table_0, f"inverse layer {i} 0deg/isotropic"
@@ -211,7 +221,7 @@ def run_inverse_search(request: InverseSearchRequest, *, stop_requested, progres
         return out
 
 
-    chosen_files = ['' if layer.is_sheet else layer.file_0deg for layer in layer_snapshot]
+    chosen_files = ['' if layer.is_sheet or layer.is_constant else layer.file_0deg for layer in layer_snapshot]
     _coverage_ok, tables_0, tables_90 = prepare_material_combo(chosen_files)
     base_thick, base_rs = grid.design(0)
     prepared_inverse_wave_terms = {}
@@ -256,7 +266,7 @@ def run_inverse_search(request: InverseSearchRequest, *, stop_requested, progres
         if not force and now - last_checkpoint < checkpoint_interval:
             return
         if search_identity(layer_snapshot, target_freqs, target_angles, wave_pol,
-                           uncertainty_cfg, score_mode) != identity:
+                           uncertainty_cfg, score_mode, requirement_db) != identity:
             raise ValueError('Material files changed during the analysis. Run again with stable inputs.')
         checkpoint_callback(dict(identity=identity, score_rows=score_rows,
                                  next_index=next_index, total=grid.total,
@@ -270,7 +280,8 @@ def run_inverse_search(request: InverseSearchRequest, *, stop_requested, progres
             thicknesses, resistances = grid.design(next_index)
             scores = score_candidate(
                 target_freqs, target_angles, build_loaded_layers(thicknesses, resistances),
-                wave_pol, scales, score_mode, prepared_inverse_wave_terms)
+                wave_pol, scales, score_mode, prepared_inverse_wave_terms,
+                **({'requirement_db': requirement_db} if requirement_db is not None else {}))
             if len(scores) != 5 or not all(math.isfinite(v) for v in scores):
                 raise ValueError(f'Combination {next_index + 1}: incomplete or nonfinite scores.')
             score_rows.extend(scores)
@@ -317,7 +328,7 @@ def run_inverse_search(request: InverseSearchRequest, *, stop_requested, progres
         inverse_samples = []
     completed['plots_complete'] = len(inverse_samples) == len(top_candidates)
     if search_identity(layer_snapshot, target_freqs, target_angles, wave_pol,
-                       uncertainty_cfg, score_mode) != identity:
+                       uncertainty_cfg, score_mode, requirement_db) != identity:
         raise ValueError("Material files changed during the analysis. Run again with stable inputs.")
     complete = next_index == grid.total
     publish_checkpoint(force=True, plots_complete=completed['plots_complete'])
@@ -325,8 +336,13 @@ def run_inverse_search(request: InverseSearchRequest, *, stop_requested, progres
               'Stopped; analysis is incomplete. Resume to analyze the remaining combinations')
     if not completed['plots_complete']:
         status += '. Comparison plots unfinished; Resume completes them'
-    best_text = (f'Best score: {top_candidates[0].score_db:.3f} dB' if top_candidates
+    score_label = 'Best gap' if requirement_db is not None else 'Best score'
+    best_text = (f'{score_label}: {top_candidates[0].score_db:.3f} dB' if top_candidates
                  else 'No combination was fully evaluated.')
+    if requirement_db is not None:
+        passing = sum(score_rows[5*i] <= 0 for i in range(next_index))
+        best_text += (f'\nRequirement: PEC reflection ≤ {requirement_db:g} dB at every analyzed frequency/angle/tolerance case.'
+                      f'\nPassing designs: {passing:,} / {next_index:,} completed. Gap = worst reflection − target; ≤ 0 passes.')
     msg = (f'{status}.\n'
            f'Evaluated: {next_index:,} of {grid.total:,} combinations\n'
            f'Objective: {score_mode}\n'

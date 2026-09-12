@@ -109,30 +109,12 @@ why one azimuth still needs nearly as much memory as a sweep.
    include separate base/fine work counters. CPU cancellation is checked
    between batches and the scoped retained system is cleared on exit.
 
-## Validation
+## Regression coverage
 
-- Saved the complete pre-update ghost_backend and ran separate-process comparisons.
-- Compared 14 material configurations at 361 angles, TE/TM, monostatic and
-  bistatic. Maximum peak-scaled complex-field differences were 1.37×10⁻¹³
-  and 9.21×10⁻¹⁴ respectively. Experimental CPU also passed the material
-  comparison and existing screened-kernel tests.
-- The main 118-test regression run passed: physical cylinder references,
-  PEC interior resonance, layered and magnetic media, junctions, reciprocity,
-  sheet endpoints, thin-layer bulk references, certification, export,
-  compaction, memory gates, CPU precision and cancellation.
-- Additional pipeline and real headless-worker tests passed, including
-  per-batch/factor counters, default CPU cancellation, multi-frequency
-  bistatic output, density-only projection omission, weak-reference operator
-  lifetime checks, and fresh-versus-reused matrix comparisons.
-- The standalone HPC scheduling suite passed with zero failures, including
-  exact resource planning, local worker execution, output verification and
-  resume. Both modern Python 3.12 and actual Python 3.6.8 with
-  NumPy 1.14.3/SciPy 1.0.0 passed the pipeline/experimental checks.
-
-Evidence: [comparison results](C:/Users/14col/Documents/ChatGPT/GHOST_FREDDY_GRIM/solver-wide-updates-2026-09-10/comparison-results.json),
-[resource results](C:/Users/14col/Documents/ChatGPT/GHOST_FREDDY_GRIM/solver-wide-updates-2026-09-10/resource-results.json),
-[comparison runner](C:/Users/14col/Documents/ChatGPT/GHOST_FREDDY_GRIM/solver-wide-updates-2026-09-10/verify.py),
-[regression tests](ghost_backend/tests/test_solver_matrix_pipeline.py).
+The maintained [pipeline tests](ghost_backend/tests/test_solver_matrix_pipeline.py)
+cover factor and batch counters, cancellation, multi-frequency bistatic output,
+density-only projection, operator lifetimes, and fresh-versus-reused matrices.
+Physical-reference and local/HPC integration tests remain in `ghost_backend/tests`.
 
 ## Subsequent implementation
 

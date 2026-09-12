@@ -135,6 +135,7 @@ def plot_datasets(
     square_aspect: bool = False,
     color_limits: tuple[float, float] | None = None,
     color_step: float = 0.0,
+    delta_options: dict[str, object] | None = None,
 ):
     """Create a Matplotlib Figure from resolved physical selector values.
 
@@ -156,12 +157,13 @@ def plot_datasets(
         "frequency",
         "elevation_sweep",
         "isar_image",
+        "delta_map",
     }
     if mode_key not in supported_modes:
         raise ValueError(
             f"Unsupported headless plot mode {mode!r}; supported modes are "
-            "azimuth_rect, azimuth_polar, frequency, elevation_sweep, and "
-            "isar_image"
+            "azimuth_rect, azimuth_polar, frequency, elevation_sweep, "
+            "isar_image, and delta_map"
         )
     if mode_key == "isar_image" and len(selected) != 1:
         raise ValueError("ISAR headless plotting requires exactly one dataset")
@@ -172,6 +174,31 @@ def plot_datasets(
     if reference_position < 0 or reference_position >= len(selected):
         raise ValueError("reference_index must identify one selected dataset")
     reference = selected[reference_position][1]
+
+    if mode_key == "delta_map":
+        from GRIM_Backend.plotting.modes import delta_map_mode
+
+        if phase or str(scale).strip().lower() == "linear":
+            raise ValueError("Delta Map compares logarithmic levels in dB; phase and linear scales are unsupported")
+        options = dict(delta_options or {})
+        unknown = set(options) - {"x_axis", "y_axis", "limit", "show_values"}
+        if unknown:
+            raise ValueError(f"Unknown Delta Map options: {sorted(unknown)}")
+        result = delta_map_mode.prepare(
+            selected, reference=reference,
+            selections={"azimuth": list(azimuths), "elevation": list(elevations), "frequency": list(frequencies)},
+            polarization=polarization, x_axis=options.get("x_axis", "azimuth"),
+            y_axis=options.get("y_axis", "frequency"),
+        )
+        figure = Figure(figsize=(10.0, 6.0), dpi=100, facecolor="white")
+        FigureCanvasAgg(figure)
+        axes = figure.add_subplot(111)
+        delta_map_mode.draw(figure, axes, result, limit=options.get("limit"),
+                            show_values=bool(options.get("show_values", False)),
+                            show_colorbar=bool(show_colorbar))
+        figure.text(0.01, 0.01, f"A: {result.names[0]}   |   B: {result.names[1]}   |   A - B (dB)", fontsize=8, wrap=True)
+        figure.set_layout_engine("tight", rect=(0, 0.07, 1, 1))
+        return figure
 
     from GRIM_Backend.plotting.modes import common as plot_common
 
@@ -490,6 +517,7 @@ def plot_datasets(
 
     elif mode_key == "isar_image":
         from GRIM_Backend.plotting.modes.isar_mode import _length_unit, form_isar
+        from GRIM_Backend.isar.geometry import image_extent
 
         dataset = selected[0][1]
         options = dict(isar_options or {})
@@ -553,7 +581,7 @@ def plot_datasets(
         for axis, band, display in zip(axes_values, bands, displays):
             mesh = axis.imshow(
                 display.T,
-                extent=[band["x_range"][0], band["x_range"][-1], band["y_range"][0], band["y_range"][-1]],
+                extent=image_extent(band),
                 origin="lower",
                 aspect="auto",
                 interpolation="nearest",
@@ -577,9 +605,12 @@ def plot_datasets(
         )
         elevation_name = plot_common.angular_axis_name(dataset, "elevation")
         reconstruction = str(options.get("reconstruction", "fast")).strip().lower()
-        if reconstruction in {"sparse", "l1", "sparse-l1"}:
+        resolved = {band.get('resolved_reconstruction', reconstruction) for band in bands}
+        if len(resolved) > 1:
+            reconstruction_label = "PFA method selected per aperture"
+        elif 'sparse' in resolved or reconstruction in {"sparse", "l1", "sparse-l1"}:
             reconstruction_label = "Sparse L1 (Experimental)"
-        elif reconstruction in {"accurate", "cartesian", "pfa-accurate"}:
+        elif 'accurate' in resolved or reconstruction in {"accurate", "cartesian", "pfa-accurate"}:
             reconstruction_label = "Cartesian PFA"
         else:
             reconstruction_label = "Fast PFA"

@@ -11,7 +11,6 @@ from unittest import mock
 import zipfile
 
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
-from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 from matplotlib.figure import Figure
 from GRIM_Backend.reports.workspace import PptWorkspace, DatasetCatalogEntry
@@ -173,13 +172,12 @@ class WorkflowUpdatesTests(unittest.TestCase):
         self.assertEqual(ui.workflow_tabs.currentIndex(),3)
         self.assertTrue(ui.advanced_section.header.isChecked())
 
-    def test_shared_2d_setup_roundtrip_and_incompatible_hpc_rejected_atomically(self):
+    def test_2d_setup_roundtrip_and_invalid_load_rejected_atomically(self):
         module=load_ghost_module('ghost_backend.runs.setup')
         SolverTab=load_ghost_module('ghost_backend.ui.solver').SolverTab
-        from GRIM_Backend.runs.workspace import RunsWorkspace
         local=SolverTab()
-        cluster=RunsWorkspace(settings=QSettings(str(self.root/'settings.ini'),QSettings.IniFormat))
-        self.widgets.extend([local,cluster])
+        restored=SolverTab()
+        self.widgets.extend([local,restored])
         local.edit_freq_list.setText('1, 2.75')
         local.edit_elev_list.setText('-10, 0, 90')
         local.cmb_units.setCurrentText('meters')
@@ -189,15 +187,13 @@ class WorkflowUpdatesTests(unittest.TestCase):
         value=local._capture_run_setup()
         path=self.root/'target.run.json'
         module.save_setup(path,value)
-        cluster._apply_saved_run_setup(module.read_setup(path))
-        self.assertEqual(cluster._capture_run_setup(),value)
+        restored._apply_saved_run_setup(module.read_setup(path))
+        self.assertEqual(restored._capture_run_setup(),value)
         other=copy.deepcopy(value)
         other['scattering']='bistatic'
         other['observation_angles_deg']=[0.,90.]
         other['solver_method']='direct'
         other['execution_options']['factorization']='dense'
-        with self.assertRaisesRegex(ValueError,'monostatic'): cluster._apply_saved_run_setup(other)
-        self.assertEqual(cluster._capture_run_setup(),value)
         local._apply_saved_run_setup(other)
         self.assertEqual(local._capture_run_setup(),other)
         bad=copy.deepcopy(value); bad['frequencies_ghz']=[float('nan')]

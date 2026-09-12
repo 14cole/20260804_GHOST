@@ -23,6 +23,7 @@ class ExecutionOptionsWidget(QGroupBox):
         self.factor_combo = QComboBox()
         for label, value in [('Dense LU', 'dense'), ('Hierarchical factor (dense assembly)', 'hierarchical'),
                              ('Compressed assembly (low RAM)', 'compressed'),
+                             ('RAM-aware dense / compressed', 'adaptive'),
                              ('Hierarchical with dense fallback', 'auto')]:
             self.factor_combo.addItem(label, value)
         self.factor_combo.setToolTip('Compressed assembly avoids global dense matrices. Hierarchical factorization still assembles a dense operator.')
@@ -58,6 +59,11 @@ class ExecutionOptionsWidget(QGroupBox):
         browse.clicked.connect(self._browse)
         layout.addWidget(browse)
         form.addRow('Temporary disk directory', row)
+        self.mesh_combo = QComboBox()
+        self.mesh_combo.addItem('Global material wavelength', 'global')
+        self.mesh_combo.addItem('Local material sizing (experimental)', 'local')
+        self.mesh_combo.setToolTip('Protects corners, junctions and nearby boundaries. Certified runs retry global sizing if the complex-field mesh comparison fails.')
+        form.addRow('Mesh sizing', self.mesh_combo)
         self.rhs_combo = QComboBox()
         for label, value in [('Automatic', 'auto'), ('Disabled', 'off'), ('Enabled', 'on')]:
             self.rhs_combo.addItem(label, value)
@@ -78,7 +84,7 @@ class ExecutionOptionsWidget(QGroupBox):
             initial = efficient_defaults()
             self.notice.setText('Invalid launch settings. Default execution settings are shown; review them before running.')
         self.set_value(initial)
-        for widget in (self.factor_combo, self.rhs_combo):
+        for widget in (self.factor_combo, self.rhs_combo, self.mesh_combo):
             widget.currentIndexChanged.connect(self._changed)
         self.ram_spin.valueChanged.connect(self._ram_changed)
         for widget in (self.ram_spin, self.storage_spin, self.assembly_spin, self.blas_spin, self.batch_spin):
@@ -92,7 +98,7 @@ class ExecutionOptionsWidget(QGroupBox):
             self.temp_edit.setText(path)
 
     def _changed(self, *_):
-        self.storage_spin.setEnabled(self.factor_combo.currentData() == 'compressed')
+        self.storage_spin.setEnabled(self.factor_combo.currentData() in ('compressed', 'adaptive'))
         self.changed.emit()
 
     def _ram_changed(self, *_):
@@ -101,6 +107,7 @@ class ExecutionOptionsWidget(QGroupBox):
     def value(self):
         result = dict(self._retained)
         result.update(factorization=self.factor_combo.currentData(),
+                      mesh_strategy=self.mesh_combo.currentData(),
                       ram_budget_gib=(self.ram_spin.value() or None) if self._ram_edited else self._retained['ram_budget_gib'],
                       compressed_storage_mib=self.storage_spin.value(),
                       temporary_directory=self.temp_edit.text().strip(),
@@ -111,12 +118,13 @@ class ExecutionOptionsWidget(QGroupBox):
 
     def set_value(self, raw):
         value = validate_options(raw)
-        widgets = (self.factor_combo, self.rhs_combo, self.ram_spin, self.storage_spin,
+        widgets = (self.factor_combo, self.rhs_combo, self.mesh_combo, self.ram_spin, self.storage_spin,
                    self.assembly_spin, self.blas_spin, self.batch_spin, self.temp_edit)
         blockers = [QSignalBlocker(widget) for widget in widgets]
         self._retained = value
         self._ram_edited = False
         self.factor_combo.setCurrentIndex(self.factor_combo.findData(value['factorization']))
+        self.mesh_combo.setCurrentIndex(self.mesh_combo.findData(value['mesh_strategy']))
         self.rhs_combo.setCurrentIndex(self.rhs_combo.findData(value['rhs_compression']))
         self.ram_spin.setValue(value['ram_budget_gib'] or 0)
         self.storage_spin.setValue(value['compressed_storage_mib'])

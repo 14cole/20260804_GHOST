@@ -399,13 +399,14 @@ except ModuleNotFoundError as exc:
             "frequency",
             "elevation_sweep",
             "isar_image",
+            "delta_map",
         }
         mode_key = str(mode).strip().lower()
         if mode_key not in supported:
             self.record_unsupported_plot(
                 mode_key,
                 "the current headless recorder supports rectangular/polar "
-                "azimuth, frequency, elevation-sweep, and ISAR plots only",
+                "azimuth, frequency, elevation-sweep, Delta Map, and ISAR plots only",
             )
             return None
         variables = [self._ensure(reference) for reference in datasets]

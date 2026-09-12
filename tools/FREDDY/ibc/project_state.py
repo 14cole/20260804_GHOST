@@ -5,6 +5,7 @@ from .ui_controls import BooleanVar, StringVar
 from .compute import LayerConfig, normalize_backing, normalize_wave_polarization
 from .io import layer_config_from_dict, layer_config_to_dict
 from .ui_options import (
+    inverse_requirement_target,
     INVERSE_SCORE_MODE_OPTIONS,
     MIX_OBJECTIVE_FORWARD,
     MIX_OBJECTIVE_PERFORMANCE,
@@ -83,6 +84,7 @@ class ProjectStateMixin:
             "inv_unc_eps_pct": self.inv_unc_eps_pct_var.get(),
             "inv_unc_mu_pct": self.inv_unc_mu_pct_var.get(),
             "inv_score_mode": self.inv_score_mode_var.get(),
+            "inv_requirement_db": self.inv_requirement_db_var.get(),
             "mix_rule": self.mix_rule_var.get(),
             "mix_objective": self.mix_objective_var.get(),
             "mix_prop_source": self.mix_prop_source_var.get(),
@@ -120,6 +122,7 @@ class ProjectStateMixin:
             "layers": [layer_config_to_dict(layer) for layer in self.layers],
             "controls": controls,
             "mixes": {"components": [dict(c) for c in self.mix_components]},
+            "tolerance_setup": self.tolerance_workspace.capture_setup(),
         }
 
     def _apply_project_state(self, state: dict[str, object]) -> None:
@@ -131,6 +134,8 @@ class ProjectStateMixin:
             raise ValueError("Project layers must be a list.")
         if not isinstance(controls, dict):
             raise ValueError("Project controls must be an object.")
+        from .tolerance_config import validate_setup
+        tolerance_setup = validate_setup(state.get('tolerance_setup', {}))
 
         loaded_layers: list[LayerConfig] = []
         for idx, raw_layer in enumerate(layers_data, start=1):
@@ -198,6 +203,7 @@ class ProjectStateMixin:
             "inv_unc_eps_pct": self.inv_unc_eps_pct_var,
             "inv_unc_mu_pct": self.inv_unc_mu_pct_var,
             "inv_score_mode": self.inv_score_mode_var,
+            "inv_requirement_db": self.inv_requirement_db_var,
             "inv_seed": self.inv_seed_var,
             "mix_rule": self.mix_rule_var,
             "mix_objective": self.mix_objective_var,
@@ -282,6 +288,9 @@ class ProjectStateMixin:
                     elif lowered.startswith("predict"):
                         value = MIX_OBJECTIVE_FORWARD
                 restored_controls[key] = value
+        restored_controls.setdefault('inv_requirement_db', '-10')
+        inverse_requirement_target(restored_controls.get('inv_score_mode', INVERSE_SCORE_MODE_OPTIONS[0]),
+                                   restored_controls['inv_requirement_db'])
         restored_bools = {key: self._coerce_bool(controls[key])
                           for key in bool_vars if key in controls}
 
@@ -311,6 +320,7 @@ class ProjectStateMixin:
             bool_vars[key].set(value)
 
         self.layers = loaded_layers
+        self.tolerance_workspace.restore_setup(tolerance_setup)
         self.mix_components = mix_components
         self._refresh_layers()
         self.angle_compare_both.setChecked(self._coerce_bool(controls.get('angle_compare_both', True)))

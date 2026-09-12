@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import copy
 from pathlib import Path
 from .ui_controls import (
     BooleanVar,
@@ -13,7 +14,7 @@ from .ui_controls import (
     messagebox,
 )
 from .compute import LayerConfig
-from .io import read_material_table
+from .io import read_material_table, constant_material_from_layer, CONSTANT_VALUE_FIELDS
 try:
     from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, Signal
     from PySide6.QtGui import QAction, QColor, QFont, QPainter, QPen
@@ -61,8 +62,8 @@ def _parse_optional_thickness(text: str, label: str) -> float | None:
     if not stripped:
         return None
     value = float(stripped)
-    if value <= 0:
-        raise ValueError(f"{label} must be > 0.")
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{label} must be finite and > 0.")
     return value
 
 class LayerDialog(QDialog):
@@ -76,6 +77,7 @@ class LayerDialog(QDialog):
         self.setWindowTitle("Layer")
         self.setModal(True)
         self.result: LayerConfig | None = None
+        self._initial_tolerances = copy.deepcopy(initial.tolerances) if initial else {}
         self.presets = presets or {}
 
         init = initial or LayerConfig(
@@ -92,6 +94,8 @@ class LayerDialog(QDialog):
         self.file_90deg_var = StringVar(init.file_90deg)
         self.pol_var = StringVar(str(init.polarization_deg))
         self.preset_var = StringVar("")
+        self.source_var = StringVar('Constant εr / μr (all frequencies)' if init.is_constant else 'Measured material CSV')
+        self.constant_vars = {key: StringVar(f'{getattr(init, key):g}') for key in CONSTANT_VALUE_FIELDS}
         default_min = 0.5 * init.thickness_in if initial is None else None
         default_max = 1.5 * init.thickness_in if initial is None else None
         default_step = init.thickness_in / 25.0 if initial is None else None
@@ -194,13 +198,39 @@ class LayerDialog(QDialog):
         buttons.rejected.connect(self.reject)
 
         outer = QVBoxLayout(self)
+        source_row = QHBoxLayout()
+        source_row.addWidget(QLabel('Material source'))
+        self.source_combo = make_combo(['Measured material CSV', 'Constant εr / μr (all frequencies)'],
+                                       self.source_var, width=310)
+        source_row.addWidget(self.source_combo, 1)
+        outer.addLayout(source_row)
+        self.constant_panel = QWidget()
+        constant_layout = QGridLayout(self.constant_panel)
+        constant_layout.setContentsMargins(10, 6, 10, 6)
+        for index, (key, label) in enumerate(zip(CONSTANT_VALUE_FIELDS, ('εr real', 'εr imaginary', 'μr real', 'μr imaginary'))):
+            row, column = divmod(index, 2)
+            constant_layout.addWidget(QLabel(label), row, 2 * column)
+            entry = QLineEdit()
+            bind_line_edit(self.constant_vars[key], entry)
+            constant_layout.addWidget(entry, row, 2 * column + 1)
+        note = QLabel('Relative εr and μr stay constant at every frequency. Enter signed imaginary parts: negative values represent passive loss in the e^(+jωt) convention.')
+        note.setWordWrap(True)
+        constant_layout.addWidget(note, 2, 0, 1, 4)
+        outer.addWidget(self.constant_panel)
+        self.file_widgets = [grid.itemAtPosition(row, col).widget()
+                             for row in range(1, 6) for col in range(3)
+                             if grid.itemAtPosition(row, col) is not None]
         outer.addLayout(grid)
         outer.addWidget(buttons)
-
+        self.source_var.valueChanged.connect(self._sync_state)
         self._sync_state()
 
-    def _sync_state(self) -> None:
-        enabled = self.aniso_var.get()
+    def _sync_state(self, *_args) -> None:
+        constant = self.source_var.get().startswith('Constant')
+        self.constant_panel.setVisible(constant)
+        for widget in self.file_widgets:
+            widget.setVisible(not constant)
+        enabled = not constant and self.aniso_var.get()
         for widget in (self.lbl_90, self.ent_90, self.btn_90, self.lbl_pol, self.ent_pol):
             widget.setEnabled(enabled)
 
@@ -228,9 +258,10 @@ class LayerDialog(QDialog):
     def _on_ok(self) -> None:
         try:
             thickness_in = float(self.thickness_var.get().strip())
-            if thickness_in <= 0:
-                raise ValueError("Thickness must be > 0.")
-            anisotropic = self.aniso_var.get()
+            if not math.isfinite(thickness_in) or thickness_in <= 0:
+                raise ValueError("Thickness must be finite and > 0.")
+            constant = self.source_var.get().startswith('Constant')
+            anisotropic = self.aniso_var.get() and not constant
             file_0deg = self.file_0deg_var.get().strip()
             file_90deg = self.file_90deg_var.get().strip()
             polarization_deg = float(self.pol_var.get().strip()) if anisotropic else 0.0
@@ -246,7 +277,7 @@ class LayerDialog(QDialog):
                         "not supported by the scalar transmission-line model."
                     )
 
-            if not file_0deg:
+            if not file_0deg and not constant:
                 raise ValueError("0 deg/isotropic file is required.")
             if anisotropic and not file_90deg:
                 raise ValueError("90 deg file is required for anisotropic layer.")
@@ -265,16 +296,23 @@ class LayerDialog(QDialog):
             ):
                 raise ValueError("Maximum thickness must be >= minimum thickness.")
 
-            self.result = LayerConfig(
+            values = {key: float(value.get()) for key, value in self.constant_vars.items()} if constant else {}
+            result = LayerConfig(
+                tolerances=copy.deepcopy(self._initial_tolerances),
                 thickness_in=thickness_in,
                 anisotropic=anisotropic,
-                file_0deg=file_0deg,
-                file_90deg=file_90deg,
+                file_0deg='' if constant else file_0deg,
+                file_90deg='' if constant else file_90deg,
                 polarization_deg=polarization_deg,
                 inv_t_min_in=inv_t_min_in,
                 inv_t_max_in=inv_t_max_in,
                 inv_t_accuracy_in=inv_t_accuracy_in,
+                material_source='constant' if constant else 'file',
+                **values,
             )
+            if constant:
+                constant_material_from_layer(result)
+            self.result = result
             self.accept()
         except Exception as exc:
             messagebox.showerror("Invalid Layer", str(exc), parent=self)
@@ -291,6 +329,7 @@ class SheetDialog(QDialog):
         self.setWindowTitle("Resistive Sheet")
         self.setModal(True)
         self.result: LayerConfig | None = None
+        self._initial_tolerances = copy.deepcopy(initial.tolerances) if initial else {}
 
         init = initial or LayerConfig(
             thickness_in=0.0,
@@ -386,6 +425,7 @@ class SheetDialog(QDialog):
             ):
                 raise ValueError("R max must be >= R min.")
             self.result = LayerConfig(
+                tolerances=copy.deepcopy(self._initial_tolerances),
                 thickness_in=0.0,
                 anisotropic=False,
                 file_0deg="",

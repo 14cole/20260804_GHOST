@@ -71,12 +71,24 @@ def extra_polarization(compute_grid, uncertainty):
             if is_nominal_scale(*scales):
                 continue
             changed = grid_metrics(compute_grid(*scales))
-            for key, values in changed.items():
-                if 'phase' in key:
-                    values = nominal[key] + (values - nominal[key] + 180) % 360 - 180
-                lower[key] = np.minimum(lower[key], values)
-                upper[key] = np.maximum(upper[key], values)
+            accumulate_grid_bounds(nominal, lower, upper, changed)
+            del changed
     return nominal, lower, upper
+
+
+def accumulate_grid_bounds(nominal, lower, upper, changed):
+    """Update owned bounds in place; preserve nominal and each incoming case.
+
+    Phase is aligned to nominal before taking extrema, including across ±180°.
+    Only a single phase grid needs temporary storage, independent of case count.
+    """
+    import numpy as np
+    for key in lower:
+        values = np.asarray(changed[key], dtype=float)
+        if 'phase' in key:
+            values = nominal[key] + (values - nominal[key] + 180.) % 360. - 180.
+        np.minimum(lower[key], values, out=lower[key])
+        np.maximum(upper[key], values, out=upper[key])
 
 
 def band_metrics(frequencies, grid, target, low=None, high=None):
@@ -109,6 +121,38 @@ def passing_sample_ranges(values, performance, threshold):
     if start is not None:
         ranges.append((values[start], values[len(performance) - 1]))
     return ranges
+
+
+def write_comparison_report(path, result, grid, performance, *, polarization,
+                            reflection_key, bound, target, low, high):
+    """Export a captured reflection comparison, independent of live GUI setup.
+
+    Rows use original sweep order and full computed grids, even if a plot was
+    decimated or the on-screen table was sorted. This is not a nominal IBC.
+    """
+    import csv
+    import numpy as np
+    from .io import _atomic_text_file, _validate_csv_path
+    path = Path(path)
+    _validate_csv_path(path)
+    nulls = np.asarray(result.frequencies)[np.argmin(grid, axis=0)]
+    with _atomic_text_file(path, newline='') as stream:
+        writer = csv.writer(stream, lineterminator='\n')
+        writer.writerow(['selection_index', 'selection_axis', 'selection_value',
+                         'polarization', 'reflection_basis', 'bound', 'target_db',
+                         'band_start_ghz', 'band_stop_ghz', 'widest_band_ghz',
+                         'coverage_pct', 'worst_reflection_db', 'margin_db',
+                         'passes_entire_band', 'sampled_null_full_sweep_ghz',
+                         'output_file', 'run_context', 'stack_at_run'])
+        for index, metric in enumerate(performance):
+            writer.writerow([index + 1, result.axis_label, result.values[index],
+                             polarization, 'air' if reflection_key == 'air_loss_db' else 'pec',
+                             bound, target, low, high, metric.widest_ghz,
+                             metric.coverage_pct, metric.worst_db, target - metric.worst_db,
+                             metric.worst_db <= target, nulls[index],
+                             str(result.files[index]) if index < len(result.files) else '',
+                             result.context, '\n'.join(result.layers)])
+    return len(performance)
 
 
 def file_digest(path):

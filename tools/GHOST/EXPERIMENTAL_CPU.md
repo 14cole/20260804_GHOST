@@ -8,7 +8,7 @@ angle is computed and checked against its original equation. No GPU is required.
 ## Select the option
 
 New 2D monostatic runs use **CPU streaming (experimental)** with compressed
-assembly in GHOST, GRIM Runs, and local/HPC drivers. The
+assembly in GHOST and local/HPC drivers. The
 [efficient resource preset](RUN_PROFILES.md) is the default for new runs.
 Selecting CPU streaming sets LU precision to Double; mixed
 precision is a separate option and cannot be combined with this method.

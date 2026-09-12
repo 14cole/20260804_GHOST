@@ -1,10 +1,11 @@
 """Connect run-owned sweep results to FREDDY navigation and validated exports."""
 from pathlib import Path
+from .compute import layer_material_label
 
 
 def stack_description(layers):
     return [f'Layer {i}: sheet {layer.sheet_resistance:g} Ω/sq' if layer.is_sheet else
-            f'Layer {i}: {layer.thickness_in:g} in; {layer.file_0deg}' + (f'; 90° {layer.file_90deg}' if layer.anisotropic else '')
+            f'Layer {i}: {layer.thickness_in:g} in; {layer_material_label(layer) if layer.is_constant else layer.file_0deg}' + (f'; 90° {layer.file_90deg}' if layer.anisotropic else '')
             for i, layer in enumerate(layers, 1)]
 
 

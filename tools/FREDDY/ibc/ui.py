@@ -168,6 +168,10 @@ from .io import (
     write_material_table,
 )
 from .material_explorer import MaterialExplorerWidget, SourceRequest
+from .guide import GuideWidget, MODE_TOPICS
+from .compute import layer_material_label
+from .io import constant_material_from_layer
+from .analysis_data import accumulate_grid_bounds
 from .plot import nearest_index, style_axis, style_colorbar
 
 APP_ACRONYM = "FREDDY"
@@ -209,6 +213,15 @@ permittivity and permeability versus frequency using the
 <b>negative imaginary part</b>.</p>
 
 <h3>Material and IBC files</h3>
+<p><b>Constant material layers:</b> in Add Layer or Edit, choose
+<b>Constant εr / μr (all frequencies)</b> and enter the real and signed imaginary
+parts of relative epsilon and mu. For εr = 6 − 0.8j and μr = 1 − 0.1j, enter
+6, −0.8, 1, −0.1. The same values are used at every computed frequency, with
+no interpolation or measured-coverage restriction. They are saved directly in
+the project and work with impedance, angle/thickness sweeps, IBC batches, and
+inverse design. Measured layers in the same stack still require frequency
+coverage. Constant values are an isotropic, nondispersive model; measured CSV
+inputs remain available for frequency-dependent behavior.</p>
 <p>GHOST and FREDDY use <b>comma-separated .csv files with frequency in Hz</b>.
 A header is required. Material inputs and mixed-material exports use:</p>
 <pre>frequency_hz,eps_real,eps_imag,mu_real,mu_imag
@@ -223,6 +236,11 @@ frequencies. Blank lines and full-line # comments are allowed; UTF-8 files with
 or without a BOM are accepted. Whitespace-delimited and headerless files are
 rejected. Uncertainty, off-angle and thickness CSVs are analysis reports;
 use the nominal three-column CSV when assigning an IBC in GHOST.</p>
+<p><b>File &gt; File Converter:</b> open or drop a CSV or whitespace-delimited
+ASCII table, label its columns, and select input/output units (including Hz,
+kHz, MHz and GHz). Add constant columns for missing values. Preview the
+conversion and save a new file. For a material input, use the five labels above,
+frequency output in Hz, and comma-separated output.</p>
 
 <h3>Material variables</h3>
 <table cellspacing="6" cellpadding="4">
@@ -438,6 +456,8 @@ UNCERTAINTY_VIEW_OPTIONS = [
 ]
 from .ui_options import (
     INVERSE_SCORE_MODE_OPTIONS,
+    INVERSE_SCORE_WHOLE_BAND,
+    inverse_requirement_target,
     MIX_OBJECTIVE_FORWARD,
     MIX_OBJECTIVE_OPTIONS,
     MIX_OBJECTIVE_PERFORMANCE,
@@ -716,6 +736,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         self.inv_unc_eps_pct_var = StringVar("5.0")
         self.inv_unc_mu_pct_var = StringVar("5.0")
         self.inv_score_mode_var = StringVar(INVERSE_SCORE_MODE_OPTIONS[0])
+        self.inv_requirement_db_var = StringVar('-10')
         self.inv_refine_var = BooleanVar(True)
         self.inv_seed_var = StringVar("1")
         # Material Mix tab: predict effective properties from a volume recipe or
@@ -988,6 +1009,12 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             return
         super().closeEvent(event)
 
+    def _open_file_converter(self) -> None:
+        from .converter_dialog import FileConverterDialog
+        dialog = FileConverterDialog(self)
+        dialog.exec()
+        dialog.deleteLater()
+
     def _build_ui(self) -> None:
 
         # Global actions live in a menu bar (File / View) rather than an
@@ -1001,6 +1028,9 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         save_action = QAction("Save Project…", self)
         save_action.triggered.connect(self._save_project)
         file_menu.addAction(save_action)
+        self.file_converter_action = QAction("File Converter…", self)
+        self.file_converter_action.triggered.connect(self._open_file_converter)
+        file_menu.addAction(self.file_converter_action)
         self.view_menu = menubar.addMenu("View")
         self.dark_mode_action = QAction("Dark mode", self)
         self.dark_mode_action.setCheckable(True)
@@ -1061,6 +1091,10 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
 
         self._build_mix_tab(_add_mode)
 
+        from .tolerance_ui import ToleranceWidget
+        self.tolerance_workspace = ToleranceWidget(self)
+        _add_mode('Sensitivity & Yield', self.tolerance_workspace)
+
         # Material Explorer is informational and session-only. It deliberately
         # lives inside FREDDY so the same workspace appears in GRIM and in the
         # standalone launcher, while its file list stays out of project state.
@@ -1073,20 +1107,17 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
 
         # One read-only home for application help and material definitions.
         # It does not participate in project state or show analysis controls.
-        about_tab = QScrollArea()
-        about_tab.setWidgetResizable(True)
-        about_content = QWidget()
-        about_layout = QVBoxLayout(about_content)
-        about_layout.setContentsMargins(18, 14, 18, 18)
-        about_text = QLabel(ABOUT_GUIDE_HTML)
-        about_text.setTextFormat(Qt.RichText)
-        about_text.setWordWrap(True)
-        about_text.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        about_text.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        about_layout.addWidget(about_text)
-        about_layout.addStretch(1)
-        about_tab.setWidget(about_content)
-        _add_mode("About & Guide", about_tab)
+        self.guide = GuideWidget(ABOUT_GUIDE_HTML)
+        self.guide.mode_requested.connect(self._open_guide_workflow)
+        _add_mode("About & Guide", self.guide)
+        self.guide_action = QAction("Workflow help", self)
+        self.guide_action.setShortcut("F1")
+        self.guide_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        self.guide_action.triggered.connect(lambda: self._show_guide())
+        self.addAction(self.guide_action)
+        guide_hint = QLabel("F1 · workflow help")
+        guide_hint.setWordWrap(True)
+        nav_layout.addWidget(guide_hint)
 
         layers_group = QGroupBox("Layers (top to bottom)")
         self.layers_group = layers_group
@@ -1622,7 +1653,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         search_body.addWidget(search_help, 1, 0, 1, 3)
         search_body.setColumnStretch(2, 1)
 
-        self.inv_score_frame = CollapsibleFrame("Robust scoring", expanded=False)
+        self.inv_score_frame = CollapsibleFrame("Objective and tolerances", expanded=True)
         inv_layout.addWidget(self.inv_score_frame)
         score_body = QGridLayout(self.inv_score_frame.body)
         inv_unc_check = QCheckBox("Enable uncertainty corners")
@@ -1640,13 +1671,23 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         score_body.addWidget(self.inv_unc_mu_entry, 1, 5, Qt.AlignLeft)
         score_body.addWidget(QLabel("Score"), 2, 0, Qt.AlignLeft)
         score_body.addWidget(
-            make_combo(INVERSE_SCORE_MODE_OPTIONS, self.inv_score_mode_var, width=280),
+            make_combo(INVERSE_SCORE_MODE_OPTIONS, self.inv_score_mode_var, width=355),
             2,
             1,
             1,
             5,
             Qt.AlignLeft,
         )
+        self.inv_requirement_label = QLabel('Reflection limit (dB)')
+        score_body.addWidget(self.inv_requirement_label, 3, 0, 1, 2)
+        self.inv_requirement_entry = _entry(self.inv_requirement_db_var, 8)
+        self.inv_requirement_entry.setToolTip('Rank by worst PEC reflection minus this target over all analyzed frequencies, angles, and tolerance cases. Gap ≤ 0 passes. Saved with the search; separate from the Results comparison target.')
+        score_body.addWidget(self.inv_requirement_entry, 3, 2)
+        self.inv_objective_note = QLabel()
+        self.inv_objective_note.setWordWrap(True)
+        score_body.addWidget(self.inv_objective_note, 4, 0, 1, 6)
+        self.inv_score_mode_var.valueChanged.connect(self._sync_inverse_objective)
+        self._sync_inverse_objective()
         score_body.setColumnStretch(5, 1)
 
         self.inv_results_list = self._create_inverse_candidate_table()
@@ -1666,6 +1707,14 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         self._build_inverse_continue_actions(inv_layout)
         inv_layout.addStretch(1)
 
+
+    def _sync_inverse_objective(self, *_args):
+        whole_band = self.inv_score_mode_var.get() == INVERSE_SCORE_WHOLE_BAND
+        self.inv_requirement_entry.setEnabled(whole_band)
+        self.inv_requirement_label.setEnabled(whole_band)
+        self.inv_objective_note.setText(
+            'Minimize the worst reflection gap across every analyzed frequency, angle, and tolerance case. Gap ≤ 0 passes the limit. Verify between samples with a finer sweep.'
+            if whole_band else 'Minimize mean reflection dB across frequency and angle, then take the worst or average tolerance corner. A good mean score can still miss a peak requirement.')
 
     def _build_mix_tab(self, _add_mode) -> None:
         """Construct the material recipe and target controls."""
@@ -2152,6 +2201,8 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         }}
         """
         self.setStyleSheet(qss)
+        self.guide.apply_theme(colors)
+        self.tolerance_workspace.apply_theme(colors)
         self.layer_preview.update()
         if self.material_explorer is not None:
             self.material_explorer.apply_theme(colors)
@@ -2759,7 +2810,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             painter.setPen(pen)
             painter.drawRect(rect)
 
-            material_name = Path(layer.file_0deg).stem or Path(layer.file_0deg).name or "material"
+            material_name = 'Constant εr / μr' if layer.is_constant else Path(layer.file_0deg).stem or Path(layer.file_0deg).name or "material"
             layer_type = "aniso" if layer.anisotropic else "iso"
             label = f"{i}. {material_name} | {layer.thickness_in:g} in | {layer_type}"
             max_chars = max(16, int((x1 - x0) / 6.7))
@@ -2779,6 +2830,8 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         painter.drawRect(QRectF(x0, y0, x1 - x0, y1 - y0))
 
     def _refresh_layers(self) -> None:
+        if hasattr(self, 'tolerance_workspace'):
+            self.tolerance_workspace.refresh_layers()
         self._schedule_inverse_work_count()
         self.layer_list.clear()
         for i, layer in enumerate(self.layers, start=1):
@@ -2793,6 +2846,8 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
                     if layer.inv_rs_accuracy is not None:
                         rparts.append(f"step={layer.inv_rs_accuracy:g}")
                     desc += f" | inv[{', '.join(rparts)}]"
+            elif layer.is_constant:
+                desc = f'{i}. t={layer.thickness_in:g} in | {layer_material_label(layer)}'
             elif layer.anisotropic:
                 file0 = Path(layer.file_0deg).name or layer.file_0deg
                 file90 = Path(layer.file_90deg).name or layer.file_90deg
@@ -2851,7 +2906,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         """Layers whose thickness can be swept, as (index, label) pairs. Sheet
         layers are excluded: they are zero-thickness impedance boundaries."""
         return [
-            (i, f"{i + 1}. {Path(layer.file_0deg).name or layer.file_0deg}")
+            (i, f"{i + 1}. {layer_material_label(layer)}")
             for i, layer in enumerate(self.layers)
             if not layer.is_sheet
         ]
@@ -3004,6 +3059,15 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
     def _load_layers(self, layer_configs: list[LayerConfig] | None = None) -> list[LoadedLayer]:
         source_layers = self.layers if layer_configs is None else layer_configs
         loaded: list[LoadedLayer] = []
+        # Share duplicate material tables within this run. A later run always
+        # reads disk again, so replacing a source cannot leave a stale cache.
+        tables = {}
+
+        def material_table(filename):
+            path = Path(filename).resolve()
+            if path not in tables:
+                tables[path] = read_material_table(path)
+            return tables[path]
         for i, layer in enumerate(source_layers, start=1):
             if layer.is_sheet:
                 if layer.sheet_resistance <= 0:
@@ -3025,9 +3089,11 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             if t_m <= 0:
                 raise ValueError(f"Layer {i}: thickness must be > 0.")
 
-            table_0 = read_material_table(Path(layer.file_0deg))
+            if layer.material_source not in ('file', 'constant'):
+                raise ValueError(f'Layer {i}: choose a material CSV or constant ε/μ.')
+            table_0 = constant_material_from_layer(layer) if layer.is_constant else material_table(layer.file_0deg)
             table_90 = (
-                read_material_table(Path(layer.file_90deg))
+                material_table(layer.file_90deg)
                 if layer.anisotropic
                 else None
             )
@@ -3043,27 +3109,11 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         return loaded
 
     def _snapshot_layers(self) -> list[LayerConfig]:
-        return [
-            LayerConfig(
-                thickness_in=layer.thickness_in,
-                anisotropic=layer.anisotropic,
-                file_0deg=layer.file_0deg,
-                file_90deg=layer.file_90deg,
-                polarization_deg=layer.polarization_deg,
-                is_sheet=layer.is_sheet,
-                sheet_resistance=layer.sheet_resistance,
-                inv_t_min_in=layer.inv_t_min_in,
-                inv_t_max_in=layer.inv_t_max_in,
-                inv_t_accuracy_in=layer.inv_t_accuracy_in,
-                inv_rs_min=layer.inv_rs_min,
-                inv_rs_max=layer.inv_rs_max,
-                inv_rs_accuracy=layer.inv_rs_accuracy,
-            )
-            for layer in self.layers
-        ]
+        return copy.deepcopy(self.layers)
 
     def _set_task_state(self, running: bool, text: str) -> None:
         self._task_running = running
+        self.tolerance_workspace.set_busy(running)
         for btn in (
             self.compute_btn,
             self.coating_check_btn,
@@ -3096,6 +3146,10 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         if self.mix_stop_btn is not None:
             self.mix_stop_btn.setEnabled(running and self._mix_active)
         self.inv_extend_btn.setEnabled(not running and self._inverse_can_resume())
+        for panel in self.analysis_panels.values():
+            if hasattr(panel, 'export_action'):
+                panel.export_action.setEnabled(not running and panel.result is not None
+                                               and not panel.view.currentText().startswith('Coating'))
         self._refresh_ibc_batch_preview()
         self.status_var.set(text)
         if self.status_progress is not None:
@@ -3128,6 +3182,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         timer.setInterval(100)
 
         def _poll() -> None:
+            from .tolerance_analysis import StopToleranceAnalysis
             try:
                 status, payload = result_q.get_nowait()
             except queue.Empty:
@@ -3146,13 +3201,31 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             self._set_task_state(False, "Ready")
             if status == "ok":
                 on_success(payload)  # type: ignore[arg-type]
-            elif isinstance(payload, StopMixSearch):
+            elif isinstance(payload, (StopMixSearch, StopToleranceAnalysis)):
                 self.status_var.set(str(payload))
+                if isinstance(payload, StopToleranceAnalysis):
+                    self.tolerance_workspace.progress_label.setText(str(payload))
             else:
                 messagebox.showerror(error_title, str(payload))
 
         timer.timeout.connect(_poll)
         timer.start()
+
+    def _show_guide(self, topic=None) -> None:
+        topic = topic or MODE_TOPICS.get(self._active_left_tab_label(), 'overview')
+        self.guide.open_topic(topic)
+        self._select_mode(self._mode_labels.index('About & Guide'))
+
+    def _open_guide_workflow(self, mode) -> None:
+        if mode not in MODE_TOPICS:
+            return
+        if mode in self._analysis_page_indices:
+            self._analysis_page_indices[mode] = 0
+        if mode == 'Inverse Design':
+            self._inverse_page_index = 0
+        if mode == 'Sensitivity & Yield':
+            self.tolerance_workspace.tabs.setCurrentIndex(0)
+        self._select_mode(self._mode_labels.index(mode))
 
     def _select_mode(self, index: int) -> None:
         if self.mode_stack is None:
@@ -3169,7 +3242,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
 
         requests: list[SourceRequest] = []
         for index, layer in enumerate(self.layers, start=1):
-            if layer.is_sheet:
+            if layer.is_sheet or layer.is_constant:
                 continue
             primary = str(layer.file_0deg).strip()
             if primary:
@@ -3226,6 +3299,9 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
     def _is_about_active(self) -> bool:
         return self._active_left_tab_label() == "About & Guide"
 
+    def _is_tolerance_active(self) -> bool:
+        return self._active_left_tab_label() == 'Sensitivity & Yield'
+
     def _is_thickness_tab_active(self) -> bool:
         return self._active_left_tab_label() == "Thickness"
 
@@ -3245,7 +3321,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             self.inverse_workspace_tabs.setTabVisible(1, inverse)
             self.inverse_workspace_tabs.tabBar().setVisible(inverse)
             del blocker
-        read_only_page = self._is_material_explorer_active() or self._is_about_active()
+        read_only_page = self._is_material_explorer_active() or self._is_about_active() or self._is_tolerance_active()
         show_solver_workspace = not (read_only_page or inverse)
         if self.layers_group is not None:
             self.layers_group.setVisible(not read_only_page)
@@ -3536,7 +3612,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         if panel is not None:
             panel.draw()
             return
-        if self._is_material_explorer_active() or self._is_about_active():
+        if self._is_material_explorer_active() or self._is_about_active() or self._is_tolerance_active():
             return
         if not MPL_AVAILABLE or self.ax_heatmap is None or self.canvas is None:
             return
@@ -3644,10 +3720,11 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
                     eps_scale=eps_scale,
                     mu_scale=mu_scale,
                     prepared_properties=prepared_properties,
+                    return_arrays=True,
                 )
                 for key in HEATMAP_METRIC_KEYS:
                     grids[key][:, j] = np.asarray(col[key], dtype=float)
-            metric_grids = {k: grids[k].tolist() for k in HEATMAP_METRIC_KEYS}
+            metric_grids = grids
         else:
             metric_grids = {k: [] for k in HEATMAP_METRIC_KEYS}
             for f_ghz in freqs:
@@ -3746,10 +3823,11 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
                     eps_scale=eps_scale,
                     mu_scale=mu_scale,
                     prepared_wave_terms=prepared_wave_terms,
+                    return_arrays=True,
                 )
                 for key in HEATMAP_METRIC_KEYS:
                     grids[key][:, j] = np.asarray(col[key], dtype=float)
-            metric_grids = {k: grids[k].tolist() for k in HEATMAP_METRIC_KEYS}
+            metric_grids = grids
         else:
             metric_grids = {k: [[] for _ in freqs] for k in HEATMAP_METRIC_KEYS}
             for t_in in thicknesses_in:
@@ -3889,11 +3967,11 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         if envelope_enabled:
             if NUMPY_AVAILABLE:
                 envelope_min = {
-                    key: np.asarray(out[key], dtype=float)
+                    key: np.asarray(out[key], dtype=float).copy()
                     for key in HEATMAP_METRIC_KEYS
                 }
                 envelope_max = {
-                    key: np.asarray(out[key], dtype=float)
+                    key: np.asarray(out[key], dtype=float).copy()
                     for key in HEATMAP_METRIC_KEYS
                 }
                 for t_scale, e_scale, m_scale in scales:
@@ -3908,15 +3986,8 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
                         eps_scale=e_scale,
                         mu_scale=m_scale,
                     )
-                    for key in HEATMAP_METRIC_KEYS:
-                        arr = np.asarray(s_out[key], dtype=float)
-                        if key in PHASE_METRIC_KEYS:
-                            nominal = np.asarray(out[key], dtype=float)
-                            arr = nominal + (arr - nominal + 180.0) % 360.0 - 180.0
-                        envelope_min[key] = np.minimum(envelope_min[key], arr)
-                        envelope_max[key] = np.maximum(envelope_max[key], arr)
-                envelope_min = {key: envelope_min[key].tolist() for key in HEATMAP_METRIC_KEYS}
-                envelope_max = {key: envelope_max[key].tolist() for key in HEATMAP_METRIC_KEYS}
+                    accumulate_grid_bounds(out, envelope_min, envelope_max, s_out)
+                    del s_out
             else:
                 envelope_min = {
                     key: [[v for v in row] for row in out[key]]
@@ -4042,10 +4113,12 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         envelope_max: dict[str, list[list[float]]] | None = None
         if envelope_enabled:
             envelope_min = {
-                key: [list(row) for row in out[key]] for key in HEATMAP_METRIC_KEYS
+                key: np.asarray(out[key], dtype=float).copy() if NUMPY_AVAILABLE else [list(row) for row in out[key]]
+                for key in HEATMAP_METRIC_KEYS
             }
             envelope_max = {
-                key: [list(row) for row in out[key]] for key in HEATMAP_METRIC_KEYS
+                key: np.asarray(out[key], dtype=float).copy() if NUMPY_AVAILABLE else [list(row) for row in out[key]]
+                for key in HEATMAP_METRIC_KEYS
             }
             for t_scale, e_scale, m_scale in scales:
                 if is_nominal_scale(t_scale, e_scale, m_scale):
@@ -4061,6 +4134,10 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
                     eps_scale=e_scale,
                     mu_scale=m_scale,
                 )
+                if NUMPY_AVAILABLE:
+                    accumulate_grid_bounds(out, envelope_min, envelope_max, s_out)
+                    del s_out
+                    continue
                 for key in HEATMAP_METRIC_KEYS:
                     grid = s_out[key]
                     for i in range(len(freqs)):
@@ -4152,12 +4229,14 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             tuple[float, float, float],
             list[tuple["np.ndarray", "np.ndarray"] | None],
         ] | None = None,
+        *, requirement_db=-10.,
     ) -> tuple[float, float, float, float, float]:
         return score_inverse_candidate(
             target_freqs, target_angles, candidate_layers, wave_pol, scales,
             score_mode, prepared_wave_terms,
             stop_requested=lambda: self._inverse_active and self._inverse_stop_event.is_set(),
             statistics=self._stats, compute_metrics=compute_angle_metrics_many,
+            requirement_db=requirement_db,
         )
 
     def _apply_inverse_candidate(self) -> None:
@@ -4189,14 +4268,17 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
                         layer.sheet_resistance = cand.sheet_resistance_ohm[i]
                     continue
                 layer.thickness_in = cand.thickness_in[i]
-                if not layer.anisotropic:
+                if not layer.anisotropic and not layer.is_constant:
                     layer.file_0deg = cand.material_files[i]
             self._refresh_layers()
 
+            requirement = self.inverse_result_metadata.get('requirement_db')
+            score_description = (f'Gap: {cand.score_db:+.3f} dB ({"PASS" if cand.score_db <= 0 else "MISS"} at {requirement:g} dB)'
+                                 if requirement is not None else f'Score: {cand.score_db:.3f} dB')
             msg = (
                 f"Applied inverse candidate #{idx + 1}.\n"
-                f"Score: {cand.score_db:.3f} dB | Nominal: {cand.nominal_mean_db:.3f} dB | "
-                f"Worst-case: {cand.worst_mean_db:.3f} dB"
+                f"{score_description} | Nominal mean: {cand.nominal_mean_db:.3f} dB | "
+                f"Worst-corner mean: {cand.worst_mean_db:.3f} dB"
             )
             messagebox.showinfo("Inverse Design", msg)
         except Exception as exc:
@@ -4237,6 +4319,9 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             if top_n <= 0:
                 raise ValueError("Keep best must be a positive integer.")
             score_mode = self.inv_score_mode_var.get().strip()
+            if score_mode not in INVERSE_SCORE_MODE_OPTIONS:
+                raise ValueError('Choose a supported inverse-design objective.')
+            requirement_db = inverse_requirement_target(score_mode, self.inv_requirement_db_var.get())
             uncertainty_cfg = self._read_inverse_uncertainty_config()
             check_layers(layer_snapshot, target_freqs, materials=False)
             grid = DesignGrid(layer_snapshot)
@@ -4288,6 +4373,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             a_start=a_start,
             a_stop=a_stop,
             numpy_available=NUMPY_AVAILABLE,
+            requirement_db=requirement_db,
         )
 
         def worker():
@@ -4321,12 +4407,17 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
                 'band_sweep': band_sweep,
                 'scores': completed['score_rows'][::5],
                 'score_mode': score_mode,
+                'requirement_db': requirement_db,
+                'layer_labels': [layer_material_label(layer) if not layer.is_sheet else 'Sheet' for layer in layer_snapshot],
                 'total': grid.total,
                 'complete': completed['next_index'] == grid.total,
                 'angles': list(target_angles),
                 'scales': build_uncertainty_scales(uncertainty_cfg),
             }
             self._inverse_summary = msg
+            if requirement_db is not None:
+                self.inv_target_db.setValue(requirement_db)
+                self.inv_curve_mode.setCurrentIndex(0)
             self.inv_setup_status.setText(msg.splitlines()[0])
             self.inv_result_status.setText(
                 f"{'Complete' if completed['next_index'] == grid.total else 'Incomplete'} · "

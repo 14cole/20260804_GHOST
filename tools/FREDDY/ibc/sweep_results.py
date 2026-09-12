@@ -4,11 +4,11 @@ from __future__ import annotations
 from pathlib import Path
 import numpy as np
 from PySide6.QtCore import Qt, QSignalBlocker
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDoubleSpinBox, QHBoxLayout,
+from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDoubleSpinBox, QFileDialog, QHBoxLayout,
     QHeaderView, QLabel, QMessageBox, QPushButton, QSplitter, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget)
 
-from .analysis_data import band_metrics, passing_sample_ranges
+from .analysis_data import band_metrics, passing_sample_ranges, write_comparison_report
 from .material_explorer import extrema_preserving_indices
 from .plot import style_axis, style_colorbar
 
@@ -43,6 +43,7 @@ class SweepResultsPanel(QWidget):
         self.selected = 0
         self.figure = self.canvas = None
         self._band_cache = None
+        self._table_key = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 6, 10, 6)
         layout.setSpacing(5)
@@ -53,6 +54,9 @@ class SweepResultsPanel(QWidget):
         details = QPushButton('Run details…')
         details.clicked.connect(self.show_details)
         top.addWidget(details)
+        explain = QPushButton('Explain view')
+        explain.clicked.connect(lambda: host._show_guide('plots-analysis'))
+        top.addWidget(explain)
         layout.addLayout(top)
         controls = QHBoxLayout()
         self.view = QComboBox()
@@ -118,14 +122,19 @@ class SweepResultsPanel(QWidget):
             self.toolbar = Toolbar(self.canvas, self)
             self.toolbar.setMaximumHeight(32)
             self.toolbar.addAction('Save plot…').triggered.connect(host._save_plot)
+            self.export_action = self.toolbar.addAction('Export comparison CSV…')
+            self.export_action.setToolTip('Export all sampled reflection choices, band metrics, passing margin, and captured run context.')
+            self.export_action.triggered.connect(self.export_comparison)
             plot_layout.addWidget(self.toolbar)
             plot_layout.addWidget(self.canvas, 1)
             self.canvas.mpl_connect('button_press_event', self.plot_clicked)
         except ImportError:
             plot_layout.addWidget(QLabel('Install matplotlib to view plots.'))
         self.split.addWidget(plot)
-        self.table = QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels(['Plot', 'Selection', 'Widest band (GHz)', 'Coverage (%)', 'Worst (dB)', 'Null at (GHz)', 'Output file'])
+        self.table = QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels(['Plot', 'Selection', 'Widest band (GHz)', 'Coverage (%)', 'Worst (dB)', 'Null at (GHz)', 'Output file', 'Margin (dB)'])
+        self.table.horizontalHeaderItem(5).setToolTip('Sampled reflection minimum over the entire completed frequency sweep, not just the comparison band.')
+        self.table.horizontalHeaderItem(7).setToolTip('Target minus worst reflection in the selected band. Nonnegative means the entire band passes under the displayed bound.')
         self.table.verticalHeader().hide()
         self.table.verticalHeader().setDefaultSectionSize(25)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -159,6 +168,7 @@ class SweepResultsPanel(QWidget):
         self.result = result
         self.table.horizontalHeaderItem(1).setText(result.axis_label)
         self._band_cache = None
+        self._table_key = None
         self.selected = 0
         n = len(result.values)
         self.checked = set(np.linspace(0, n - 1, min(5, n), dtype=int).tolist())
@@ -203,7 +213,8 @@ class SweepResultsPanel(QWidget):
         return nominal, np.asarray(lower), np.asarray(upper)
 
     def display_grid(self, nominal, lower, upper):
-        return (nominal, upper, lower, upper - lower)[self.bound.currentIndex()]
+        index = self.bound.currentIndex()
+        return upper - lower if index == 3 else (nominal, upper, lower)[index]
 
     def comparison_index(self):
         return self.bound.currentIndex() if self.bound.currentIndex() < 3 else 0
@@ -214,8 +225,8 @@ class SweepResultsPanel(QWidget):
             nominal, lower, upper = self.grids(self.reflection_key())
             options = dict(low=self.start.value(), high=self.stop.value())
             nom = band_metrics(self.result.frequencies, nominal, self.target.value(), **options)
-            worst = band_metrics(self.result.frequencies, upper, self.target.value(), **options)
-            best = band_metrics(self.result.frequencies, lower, self.target.value(), **options)
+            worst = nom if upper is nominal else band_metrics(self.result.frequencies, upper, self.target.value(), **options)
+            best = nom if lower is nominal else band_metrics(self.result.frequencies, lower, self.target.value(), **options)
             self._band_cache = key, nom, worst, best
         return self._band_cache[1:]
 
@@ -227,7 +238,16 @@ class SweepResultsPanel(QWidget):
             metrics = self.performance()[self.comparison_index()]
         except ValueError as exc:
             self.note.setText(str(exc))
+            self._table_key = None
+            self.table.setRowCount(0)
             self.draw()
+            return
+        self._populate_table(metrics)
+        self.draw()
+
+    def _populate_table(self, metrics):
+        table_key = (self._band_cache[0], self.comparison_index())
+        if self._table_key == table_key:
             return
         blocker = QSignalBlocker(self.table)
         self.table.setSortingEnabled(False)
@@ -250,10 +270,15 @@ class SweepResultsPanel(QWidget):
             item = QTableWidgetItem(Path(path).name)
             item.setToolTip(str(path))
             self.table.setItem(index, 6, item)
+            margin = self.target.value() - metric.worst_db
+            item = NumericItem(f'{margin:+.5g}')
+            item.setData(Qt.UserRole + 1, margin)
+            item.setToolTip('Passes the whole selected band' if margin >= 0 else 'Misses the whole-band requirement')
+            self.table.setItem(index, 7, item)
         self.table.setSortingEnabled(True)
         self.select_table_row()
         del blocker
-        self.draw()
+        self._table_key = table_key
 
     def select_table_row(self):
         for row in range(self.table.rowCount()):
@@ -291,6 +316,30 @@ class SweepResultsPanel(QWidget):
             text = 'No completed run yet.'
         QMessageBox.information(self, 'Run details', text)
 
+    def export_comparison(self):
+        if self.result is None or self.view.currentText().startswith('Coating') or self.host.job_is_running():
+            return
+        try:
+            metrics = self.performance()[self.comparison_index()]
+        except ValueError as exc:
+            QMessageBox.warning(self, 'Export comparison', str(exc))
+            return
+        # Capture every display choice before opening a file dialog or worker.
+        result = self.result
+        nominal, lower, upper = self.grids(self.reflection_key())
+        grid = (nominal, upper, lower)[self.comparison_index()]
+        options = dict(polarization=self.polarization.currentText(), reflection_key=self.reflection_key(),
+                       bound=('nominal', 'upper analyzed', 'lower analyzed')[self.comparison_index()],
+                       target=self.target.value(), low=self.start.value(), high=self.stop.value())
+        filename, _filter = QFileDialog.getSaveFileName(self, 'Export reflection comparison',
+                                                       'freddy_comparison.csv', 'CSV files (*.csv)')
+        if not filename:
+            return
+        self.host._run_background_task('Comparison export',
+            lambda: write_comparison_report(filename, result, grid, metrics, **options),
+            lambda count: self.host.status_var.set(f'Exported {count:,} comparison rows to {filename}'),
+            'Comparison export')
+
     def set_coating(self, report, context):
         self.coating, self.coating_context = report, context
         if self.view.findText('Coating error vs angle') < 0:
@@ -326,6 +375,8 @@ class SweepResultsPanel(QWidget):
         self.frequency.setEnabled(view in ('Heatmap', 'At selected frequency', 'TE/TM comparison'))
         self.bound.setEnabled(not coating and view not in ('Power balance', 'Resistance', 'Reactance', 'Tolerance envelope'))
         self.use_ibc.setEnabled(self.result is not None and not self.host.job_is_running())
+        if hasattr(self, 'export_action'):
+            self.export_action.setEnabled(self.result is not None and not coating and not self.host.job_is_running())
         self.status.setText(self.coating_context if coating else self.result.context if self.result else 'Run from Setup to populate these results.')
         if self.figure is None:
             return
@@ -345,6 +396,9 @@ class SweepResultsPanel(QWidget):
                 self.draw_result(ax, view)
                 basis = 'Air' if self.reflection_key() == 'air_loss_db' else 'PEC'
                 metrics = self.performance()[self.comparison_index()]
+                # A view may reset a span bound above; keep visible table values
+                # and CSV interpretation in step with that effective bound.
+                self._populate_table(metrics)
                 passing = passing_sample_ranges(self.result.values, metrics, self.target.value())
                 unit = self.result.axis_label.split('(')[-1].rstrip(')')
                 passed = '; '.join((f'{low:g}' if low == high else f'{low:g}–{high:g}') + f' {unit}' for low, high in passing[:5])

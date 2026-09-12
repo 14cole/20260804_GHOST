@@ -89,6 +89,7 @@ _SETTINGS_BY_SOLVER = {
         "ASSEMBLY_THREADS",
     },
     "bor": _COMMON_SETTINGS | {
+        "BOR_EXECUTION_OPTIONS",
         "ELEVATIONS_DEG",
         "BODY_AXIS_AZ_DEG",
         "BODY_AXIS_EL_DEG",
@@ -610,6 +611,14 @@ def _validate_settings(solver: 'str', raw_settings: 'Any') -> 'Dict[str, Any]':
             settings = reconcile_settings(settings)
         except ValueError as exc:
             raise BundleError(str(exc))
+    elif 'BOR_EXECUTION_OPTIONS' in settings:
+        from ghost_backend.bor.options import validate_options
+        try:
+            settings['BOR_EXECUTION_OPTIONS'] = validate_options(settings['BOR_EXECUTION_OPTIONS'])
+        except ValueError as exc:
+            raise BundleError(str(exc))
+        if settings['BOR_EXECUTION_OPTIONS']['factorization'] == 'compressed' and settings.get('TABLE_PRECISION') == 'single':
+            raise BundleError('Compressed BOR assembly requires double precision.')
     unknown = sorted(set(settings) - _SETTINGS_BY_SOLVER[solver])
     if unknown:
         raise BundleError(

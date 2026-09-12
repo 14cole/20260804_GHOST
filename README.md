@@ -2,7 +2,7 @@
 
 This branch is the single-folder distribution of GRIM, GHOST, and FREDDY.
 GRIM is the main desktop application. Its tabs are **Plotting | ISAR | FREDDY |
-GHOST | Assembly | PPT | Runs | Python**. GHOST supplies the 2-D and body-of-revolution RCS
+GHOST | Assembly | PPT | Python**. GHOST supplies the 2-D and body-of-revolution RCS
 solvers; FREDDY supplies planar material-stack, impedance, reflection,
 transmission, absorption, and material-mixing analysis. PPT builds uniform,
 previewed PowerPoint reports from loaded RCS datasets.
@@ -18,7 +18,7 @@ studies still await independent full-wave artifacts. Their templates and passing
 software tests do not establish feature-family accuracy. See
 [the validation scope](tools/GHOST/ghost_backend/validation/feature_family_studies/README.md).
 
-Length inputs and displays default to inches: GHOST/Runs geometry, thin-layer
+Length inputs and displays default to inches: GHOST geometry, thin-layer
 thickness, FREDDY thickness sweeps, ISAR range axes, Assembly display/tolerance
 controls, and calibration range offsets. Saved unit selections are preserved.
 Imported unitless meshes and placement CSVs still require their source units
@@ -41,7 +41,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for module responsibilities and extension
 boundaries.
 
 See [WORKFLOW_GUIDE.md](WORKFLOW_GUIDE.md) for fixed/variable FREDDY searches,
-stop/extend and candidate saves, shared GHOST/Runs setups, Assembly mapping and
+stop/extend and candidate saves, saved GHOST setups, Assembly mapping and
 variants, and reusable PowerPoint report recipes.
 
 ## Folder layout
@@ -59,7 +59,6 @@ GRIM/
     assembly/           Models, recipes, editors, and assembly workflows
     integrations/       GHOST and FREDDY embedding
     execution/          Background jobs and diagnostics
-    runs/               Remote jobs and Runs workspace
     reports/            PowerPoint tools and templates
     scripting/          Python API, CLI, and recorded scripts
     docs/               Usage and backend navigation guides
@@ -255,22 +254,11 @@ py impedance_gui.py
   and other analysis CSVs are deliberately excluded from this handoff.
 - Use **GHOST** to create and solve 2-D or axisymmetric BoR geometries. Solver
   `.grim` exports are loaded directly into GRIM.
-- Use **Runs** to export a hash-verified portable HPC request or submit it
-  directly from Windows to a headless Linux SLURM machine over OpenSSH or a
-  saved PuTTY session. Direct mode builds the request from the visible form,
-  uploads it, creates Linux-native provenance, records the returned job IDs,
-  and can refresh status, show the submission log, cancel, or download results.
-  An interrupted submission is recovered from its deterministic remote
-  `stage_result.json` instead of being blindly resubmitted. A configurable
-  remote Python path supports cluster virtual environments, and downloads are
-  terminal-state-only and collision-safe.
-  GRIM stores no SSH password or private-key contents. The exported bundle and
-  its README remain the fallback for VPN, MFA, or site-policy restrictions. If
-  Plink reports that it cannot answer an interactive prompt in batch mode, run
-  the same saved session once from interactive Plink to identify the prompt;
-  configure a verified host key plus Pageant/key authentication, or reuse an
-  authenticated PuTTY session with SSH connection sharing enabled. The detailed
-  commands are in `GRIM_Backend/docs/README.md`.
+- Use the [local and HPC drivers](tools/GHOST/HPC.md) for batch solves.
+  Configure the run scripts directly or supply validated driver JSON with a
+  saved GHOST setup. The bundle CLI can package portable geometry/material
+  inputs for transfer and staging on Linux. Copy completed `.grim` results
+  locally and open them in GRIM.
 - Use **Assembly → Body / Point Features / Line Features** to load the same strict placement CSV used
   by local/HPC feature workflows, map each dataset ID to an OPN-FRD GRIM, and
   preview an STL/facet or embedded BoR body with point/line locations before
@@ -318,7 +306,7 @@ py impedance_gui.py
   frequency, and elevation-sweep plot creation/export actions. PBP, Hold
   overlays, and other plot modes are identified in comments instead of being represented as
   falsely equivalent runnable code. Navigation, selection gestures, zoom/pan,
-  and the PPT, Assembly, GHOST, FREDDY, and Runs workflows are not recorded.
+  and the PPT, Assembly, GHOST, and FREDDY workflows are not recorded.
 - Use **PPT** to check loaded datasets independently of the Plotting selection,
   choose rectangular/polar azimuth plots or a frequency sweep, and review the
   actual 16:9 slide layout before export. **VV and HH** produces separate
@@ -383,19 +371,9 @@ enable or disable a feature in the electromagnetic assembly.
 ## Development checks
 
 ```powershell
-py -W error -m unittest -v test_clean_utf8.py
-
-cd requirements
-py -m unittest discover -s . -p "test*.py" -v
-cd ..
-
-py -m unittest discover -s GRIM_Backend/tests -p "test*.py" -v
-
-cd tools\GHOST
-py -m unittest discover -s tests -p "test*.py" -v
-
-cd ..\FREDDY
-py -m unittest discover -s tests -p "test*.py" -v
+# Run from the repository root using the project environment.
+.venv\Scripts\python.exe verify_project.py --mode quick
+.venv\Scripts\python.exe verify_project.py --mode full
 ```
 
 The GRIM host and standalone windows call the same authoritative GHOST and

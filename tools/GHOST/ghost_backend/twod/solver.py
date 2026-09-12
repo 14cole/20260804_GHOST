@@ -1,4 +1,6 @@
 """2-D boundary-integral RCS solves and mesh certification."""
+from ghost_backend.twod.preparation import prepared_execution, prepare_geometry
+from ghost_backend.twod.meshing import segment_wavelengths
 from ghost_backend.execution.options import configured_execution, environment_value, current_options
 
 import cmath
@@ -1691,6 +1693,7 @@ def _solve_multi_region_indirect(mesh, infos, pol, k0, elevations_deg,
         observation_angles=observation_angles_deg, order=obs_order,
         return_density=return_density, project=project, coordinates=dof_coordinates(mesh, layout))
 
+@prepared_execution
 @configured_execution
 @profiled_solve
 @experimental_monostatic
@@ -1778,17 +1781,8 @@ def solve_monostatic_rcs_2d_single_polarization(
     )
     prepared = shared_cache.get("prepared") if shared_cache is not None else None
     if prepared is None:
-        base_dir = _material_base_dir_for_snapshot(
-            geometry_snapshot, material_base_dir
-        )
-        preflight_report = validate_geometry_snapshot_for_solver(
-            geometry_snapshot, base_dir=base_dir, meters_scale=unit_scale
-        )
-        materials = MaterialLibrary.from_entries(
-            geometry_snapshot.get("ibcs", []) or [],
-            geometry_snapshot.get("dielectrics", []) or [],
-            base_dir=base_dir,
-        )
+        base_dir, preflight_report, materials, _ = prepare_geometry(
+            geometry_snapshot, material_base_dir, geometry_units)
         if shared_cache is not None:
             shared_cache["prepared"] = (
                 base_dir, preflight_report, materials, float(unit_scale)
@@ -1889,6 +1883,7 @@ def solve_monostatic_rcs_2d_single_polarization(
         ref_k0 = 2.0 * math.pi * mesh_ref_ghz * 1e9 / C0
         cached_panels = _build_panels(
             geometry_snapshot, unit_scale, ref_lambda, max_panels=max_panels,
+            segment_wavelengths=segment_wavelengths(geometry_snapshot, materials, set(frequencies) | {mesh_ref_ghz}, unit_scale, ref_lambda),
         )
 
         ref_infos = _build_coupled_panel_info(cached_panels, materials, mesh_ref_ghz, pol, ref_k0)
@@ -1980,6 +1975,7 @@ def solve_monostatic_rcs_2d_single_polarization(
                 panels = _build_panels(
                     geometry_snapshot, unit_scale, lambda_min,
                     max_panels=max_panels,
+                    segment_wavelengths=segment_wavelengths(geometry_snapshot, materials, [mesh_freq_ghz], unit_scale, lambda_min),
                 )
                 preview_infos = _build_coupled_panel_info(
                     panels, materials, freq_ghz, pol, k0
@@ -2859,13 +2855,31 @@ def _frequency_local_co_solve(solve, kwargs):
     if len({float(value) for value in frequencies}) != len(frequencies):
         raise ValueError('Duplicate frequencies are not supported in a co-polarized result grid.')
     progress = kwargs.pop('progress_callback', None)
-    results = []
-    for index, frequency in enumerate(frequencies):
-        def report(done, total, message):
-            if progress is not None:
-                progress(index * 1000 + int(1000 * done / max(total, 1)),
-                         1000 * len(frequencies), message)
-        results.append(solve(frequencies_ghz=[frequency], progress_callback=report, **kwargs))
+    def completed():
+        for index, frequency in enumerate(frequencies):
+            def report(done, total, message):
+                if progress is not None:
+                    progress(index * 1000 + int(1000 * done / max(total, 1)),
+                             1000 * len(frequencies), message)
+            yield solve(frequencies_ghz=[frequency], progress_callback=report, **kwargs)
+    return _merge_frequency_results(completed(), frequencies)
+
+
+def _merge_frequency_results(results, frequencies):
+    """Consume each frequency once, retaining rows and metadata without child results."""
+    import json
+    result, records = None, []
+    for value in results:
+        if result is None:
+            result = {key: entry for key,entry in value.items() if key not in ('samples', 'co_solved_samples', 'metadata')}
+            result['samples'] = []
+            result['co_solved_samples'] = {pol: [] for pol in ('VV', 'HH')}
+        result['samples'].extend(value['samples'])
+        for pol in ('VV', 'HH'):
+            result['co_solved_samples'][pol].extend(value['co_solved_samples'][pol])
+        records.append(value['metadata'])
+    if result is None or len(records) != len(frequencies):
+        raise ValueError('Expected one completed result per requested frequency.')
 
     def combine(items, field=''):
         first = items[0]
@@ -2882,40 +2896,48 @@ def _frequency_local_co_solve(solve, kwargs):
                 return sum(finite) / len(finite)
             return max(finite) if finite else float('nan')
         if all(isinstance(v, list) for v in items):
-            merged = []
+            merged, seen = [], set()
             for value in items:
                 for entry in value:
-                    if entry not in merged:
+                    identity = json.dumps(entry, sort_keys=True, default=lambda v: v.item())
+                    if identity not in seen:
+                        seen.add(identity)
                         merged.append(entry)
             return merged
         return first
 
-    result = dict(results[0])
-    result['samples'] = [row for value in results for row in value['samples']]
-    result['co_solved_samples'] = {
-        pol: [row for value in results for row in value['co_solved_samples'][pol]]
-        for pol in ('VV', 'HH')}
     key = lambda row: (float(row['frequency_ghz']), float(row['theta_inc_deg']),
                        float(row['theta_scat_deg']), 0 if row['polarization'] == 'VV' else 1)
     result['samples'].sort(key=key)
     for rows in result['co_solved_samples'].values():
         rows.sort(key=key)
-    metadata = combine([value['metadata'] for value in results])
+    metadata = combine(records)
+    selections = [record['backend_selection'] for record in records if record.get('backend_selection')]
+    selected = sorted(set(record['selected'] for record in selections))
+    if len(selected) > 1:
+        metadata['backend_selection'] = dict(requested='adaptive', selected='mixed', choices=selected,
+            reason='Selected separately per frequency; see frequency metadata for forecasts and decisions.')
+        if metadata.get('requested_execution_options'):
+            metadata['execution_options'] = dict(metadata['requested_execution_options'])
+    strategies = sorted(set(record['mesh_strategy_used'] for record in records if record.get('mesh_strategy_used')))
+    if len(strategies) > 1:
+        metadata['mesh_strategy_used'] = 'mixed (see frequency metadata)'
 
     metadata['frequency_metadata'] = [
-        {'frequency_ghz': float(frequency), 'metadata': value['metadata']}
-        for frequency, value in zip(frequencies, results)]
+        {'frequency_ghz': float(frequency), 'metadata': value}
+        for frequency, value in zip(frequencies, records)]
     metadata['operator_cache_scope'] = 'one_frequency'
-    metadata['panel_count_min'] = min(value['metadata']['panel_count_min'] for value in results)
+    metadata['panel_count_min'] = min(value.get('panel_count_min', value.get('panel_count', 0)) for value in records)
     for key in ('dense_factorization_count', 'dense_rhs_batch_count', 'dense_rhs_column_count',
                 'assembled_system_reuses', 'shared_operator_cache_hits', 'shared_operator_cache_stores',
                 'reused_matrix_solve_count', 'residual_nonfinite_count'):
-        metadata[key] = sum(value['metadata'].get(key, 0) for value in results)
+        metadata[key] = sum(value.get(key, 0) for value in records)
     metadata['warning_count'] = len(metadata.get('warnings', []))
     result['metadata'] = metadata
     return result
 
 
+@prepared_execution
 @configured_execution
 @profiled_solve
 @experimental_monostatic
@@ -2977,6 +2999,7 @@ def solve_monostatic_rcs_2d(
     return _merge_co_polarized_2d_results(channel_results)
 
 
+@prepared_execution
 @configured_execution
 @profiled_solve
 def solve_bistatic_rcs_2d_single_polarization(
@@ -3298,6 +3321,7 @@ def solve_bistatic_rcs_2d_single_polarization(
     }
 
 
+@prepared_execution
 @configured_execution
 @profiled_solve
 @shared_assembly
@@ -3351,7 +3375,26 @@ def solve_bistatic_rcs_2d(
     return merged
 
 
-def _run_certified_2d_pair(
+def _run_certified_2d_pair(*args, **kwargs):
+    from ghost_backend.execution.options import option, execution_scope
+    try:
+        return _run_certified_2d_pair_impl(*args, **kwargs)
+    except ValueError as exc:
+        if option('mesh_strategy', 'global') != 'local' or not str(exc).startswith('Certified 2-D mesh convergence failed:'):
+            raise
+        reason = str(exc)
+    progress = kwargs.get('progress_callback', args[4] if len(args) > 4 else None)
+    if progress is not None:
+        progress(0, 1, 'Local mesh comparison failed; retrying global material sizing.')
+    options = dict(current_options(), mesh_strategy='global')
+    with execution_scope(options):
+        result = _run_certified_2d_pair_impl(*args, **kwargs)
+    result['metadata']['local_mesh_fallback'] = reason
+    result['metadata']['mesh_strategy_used'] = 'global'
+    return result
+
+
+def _run_certified_2d_pair_impl(
     low_level_solver: 'Callable[..., Dict[str, Any]]',
     geometry_snapshot: 'Dict[str, Any]',
     solver_kwargs: 'Dict[str, Any]',
@@ -3514,6 +3557,8 @@ def _certify_2d_results(base_result, fine_result, policy):
 
     result = fine_result
     metadata = result.setdefault("metadata", {})
+    from ghost_backend.execution.options import option
+    metadata['mesh_strategy_used'] = option('mesh_strategy', 'global')
     metadata["mesh_convergence"] = mesh_gate
     metadata["mesh_convergence_certified"] = True
     metadata["certified_entry_point"] = True
@@ -3532,6 +3577,7 @@ def _certify_2d_results(base_result, fine_result, policy):
     return result
 
 
+@prepared_execution
 @configured_execution
 @profiled_solve
 @experimental_monostatic
@@ -3578,6 +3624,7 @@ def solve_monostatic_rcs_2d_certified_single_polarization(
     )
 
 
+@prepared_execution
 @configured_execution
 @profiled_solve
 def solve_bistatic_rcs_2d_certified_single_polarization(
@@ -3623,6 +3670,7 @@ def solve_bistatic_rcs_2d_certified_single_polarization(
     )
 
 
+@prepared_execution
 @configured_execution
 @profiled_solve
 @experimental_monostatic
@@ -3675,6 +3723,7 @@ def _mark_co_polarized_survey_result(
     return result
 
 
+@prepared_execution
 @configured_execution
 @profiled_solve
 @experimental_monostatic
@@ -3717,6 +3766,7 @@ def solve_monostatic_rcs_2d_survey(
     )
 
 
+@prepared_execution
 @configured_execution
 @profiled_solve
 def solve_bistatic_rcs_2d_certified(
@@ -3748,6 +3798,7 @@ def solve_bistatic_rcs_2d_certified(
                                  mesh_convergence_policy, progress_callback)
 
 
+@prepared_execution
 @configured_execution
 @profiled_solve
 def solve_bistatic_rcs_2d_survey(

@@ -3,6 +3,12 @@
 Open `Launch_GHOST_GUI.bat` to start GHOST. The top level contains the launcher,
 Markdown guides, and one `ghost_backend` folder.
 
+GHOST saves separate 2D and BOR `.run.json` setups that local/HPC driver
+configurations can reuse.
+BOR controls include a bounded coefficient cache for compressed solves. See
+[BOR controls and angle conventions](BOR_PERFORMANCE.md) and the shared
+[workflow guide](../../WORKFLOW_GUIDE.md) for local/HPC transfer.
+
 | Folder | Contents |
 | --- | --- |
 | `ghost_backend/twod/`, `bor/` | 2-D and body-of-revolution solvers. |
@@ -37,13 +43,18 @@ preset uses 8192 MiB compressed storage, four assembly/two BLAS threads, automat
 basis reuse, and 256-angle batches. Dense LU remains selectable for smaller runs.
 
 The visible **Geometry preset** selector offers **Small Geometry (No RAM
-Optimization)**, **Large Geometry (RAM Optimization)**, and **Balanced**. Large
+Optimization)**, **Large Geometry (RAM Optimization)**, **Balanced**, and
+**Automatic (RAM-aware)**. Large
 Geometry is the default. Detailed numerical and resource controls are under
-**Advanced Settings**, which starts collapsed in GHOST and GRIM Runs.
+**Advanced Settings**, which starts collapsed in GHOST.
 [Saved execution profiles](RUN_PROFILES.md) document the preset combinations,
 factorization, RAM admission, compressed storage, temporary disk, CPU threads,
 and sweep batching. Profiles transfer through local/HPC manifests and exports.
 The guide also describes stage/RAM progress and the repeatable benchmark.
+
+[2D pipeline controls](TWOD_PIPELINE.md) describe automatic backend selection,
+optional local material meshing, faster geometry validation, and desktop
+frequency checkpoints with verified resume.
 
 Local and HPC batch drivers accept `--config path/to/settings.config.json`.
 They also automatically load an adjacent file with the same stem and the
@@ -87,9 +98,12 @@ The 2-D diagnostic API accepts `auto` and `direct` for reference kernels and
 hierarchical, or compressed factorization within the supported combinations.
 NumPy and SciPy are required for numerical methods and condition-number checks.
 BoR supports an optional native streaming kernel.
+BoR also has [bounded aspect batches, incident-basis reuse, and experimental
+compressed modal assembly](BOR_PERFORMANCE.md), with separate controls in
+Advanced Settings and local/HPC driver configurations.
 
-The September 2026 [solver audit updates](SOLVER_AUDIT_UPDATES.md) correct
-2-D complex phase, bound BoR near storage, and add quadrature convergence
+The [phase and quadrature guidance](SOLVER_PHASE_AND_QUADRATURE.md) describes corrected
+2-D complex phase, bounded BoR near storage, and quadrature convergence
 checks. Read the phase-compatibility notes before combining legacy complex
 exports with newly generated results.
 

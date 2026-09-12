@@ -339,12 +339,12 @@ class RegridDialog(QDialog):
 
 InterpolateDialog = RegridDialog
 
-class StitchDialog(QDialog):
-    """Choose an explicit overlap policy for a union-grid merge."""
+class JoinDialog(QDialog):
+    """Join existing bins, rejecting conflicts unless a merge policy is chosen."""
 
     def __init__(self, operand_names, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Merge Overlapping Datasets")
+        self.setWindowTitle("Join / Merge Datasets")
         self.setMinimumWidth(560)
         layout = QVBoxLayout(self)
         operands = QLabel("Operand order: " + " → ".join(map(str, operand_names)))
@@ -353,6 +353,7 @@ class StitchDialog(QDialog):
         layout.addWidget(QLabel("When finite samples share the same grid cell:"))
 
         self._policy = QComboBox()
+        self._policy.addItem("Join: reject conflicting overlaps", "error")
         self._policy.addItem("Priority: first operand wins", "priority-first")
         self._policy.addItem("Priority: last operand wins", "priority-last")
         self._policy.addItem(
@@ -390,9 +391,9 @@ class StitchDialog(QDialog):
         self._tolerance_help = tolerance_help
 
         preview = QLabel(
-            "GRIM computes the merged result and overlap report in the background, "
-            "adds one new unsaved dataset, and reports resolved/equal/conflicting "
-            "counts. The complete report is retained in dataset provenance."
+            "GRIM joins existing bins without interpolation and creates one new "
+            "unsaved dataset. Merge policies also report overlap counts and "
+            "retain the complete overlap report in provenance."
         )
         preview.setWordWrap(True)
         layout.addWidget(preview)
@@ -405,6 +406,10 @@ class StitchDialog(QDialog):
     def _update_help(self, *_args) -> None:
         policy = str(self._policy.currentData())
         descriptions = {
+            "error": (
+                "Equal or complementary samples merge. Any conflicting finite "
+                "overlap stops the operation; no input takes priority."
+            ),
             "priority-first": (
                 "Conflicting overlaps use the first selected operand. Missing cells "
                 "are still filled by later operands."
@@ -1126,14 +1131,8 @@ class MedianizeDialog(QDialog):
             "slide_deg": float(self._spin_slide.value()),
         }
 
-class ExtrusionLengthDialog(QDialog):
-    """Ask the user for the extrusion length L (with units) when converting a
-    3D dBsm measurement into the 2D scattering-width dBke representation.
-
-    The conversion assumes broadside illumination of a uniform extruded body
-    and uses the textbook relation  σ_3D = (2 L² / λ) · σ_2D , so the linear-
-    sigma scale applied per frequency bin is λ_f / (2 L²) (c / (2 L² f) in Hz).
-    """
+class ExtrusionConversionDialog(QDialog):
+    """Choose direction and length for a broadside uniform-extrusion estimate."""
 
     _UNIT_TO_M = {"m": 1.0, "in": 0.0254, "ft": 0.3048}
 
@@ -1141,18 +1140,29 @@ class ExtrusionLengthDialog(QDialog):
         self,
         parent=None,
         *,
-        title: str = "Convert dBsm → dBke",
-        formula: str = (
-            "σ_2D = σ_3D · λ / (2 L²) → dBke = dBsm + 10·log₁₀(π / L²) "
-            "(frequency-independent offset)."
-        ),
+        destination: str = "dbke",
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle(title)
+        self.setWindowTitle("Extrusion Estimate")
+        self.setMinimumWidth(560)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
-            "Extrusion length L (assumes broadside illumination of a uniform extruded body):"
-        ))
+        self._direction = QComboBox()
+        self._direction.addItem("3D RCS → 2D width (dBsm → dBke)", "dbke")
+        self._direction.addItem("2D width → 3D RCS (dBke → dBsm)", "dbsm")
+        index = self._direction.findData(destination)
+        if index < 0:
+            raise ValueError("destination must be dbke or dbsm")
+        self._direction.setCurrentIndex(index)
+        layout.addWidget(QLabel("Conversion direction:"))
+        layout.addWidget(self._direction)
+        note = QLabel(
+            "Assumes broadside illumination of a uniform extruded body. "
+            "This is an extrusion estimate, not a general 2D/3D conversion. "
+            "Selected datasets with a different source quantity are reported as skipped."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        layout.addWidget(QLabel("Extrusion length L:"))
 
         row = QHBoxLayout()
         self._spin = QDoubleSpinBox()
@@ -1168,12 +1178,32 @@ class ExtrusionLengthDialog(QDialog):
         row.addStretch(1)
         layout.addLayout(row)
 
-        layout.addWidget(QLabel(formula))
+        self._formula = QLabel()
+        self._formula.setWordWrap(True)
+        layout.addWidget(self._formula)
+        self._direction.currentIndexChanged.connect(self._update_formula)
+        self._update_formula()
 
         btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btn_box.accepted.connect(self.accept)
         btn_box.rejected.connect(self.reject)
         layout.addWidget(btn_box)
+
+    def destination(self) -> str:
+        return str(self._direction.currentData())
+
+    def _update_formula(self, *_args) -> None:
+        if self.destination() == "dbke":
+            formula = (
+                "σ_2D = σ_3D · λ / (2 L²) → dBke = dBsm + 10·log₁₀(π / L²) "
+                "(L in meters; frequency-independent dB offset)."
+            )
+        else:
+            formula = (
+                "σ_3D = σ_2D · (2 L² / λ) → dBsm = dBke + 20·log₁₀(L) − "
+                "10·log₁₀(π) (L in meters; frequency-independent dB offset)."
+            )
+        self._formula.setText(formula)
 
     def length_m(self) -> float:
         unit = self._combo.currentText().strip().lower()

@@ -19,9 +19,10 @@ class InverseResultsMixin:
                         self.setCurrentCell(row, 1)
                         return
 
-        table = CandidateTable(0, 8)
+        table = CandidateTable(0, 9)
         table.setHorizontalHeaderLabels(['Plot', 'Candidate', 'Score (dB)', 'Coverage (%)',
-                                          'Widest band (GHz)', 'Deepest (dB)', 'Worst point (dB)', 'Thickness (in)'])
+                                          'Widest band (GHz)', 'Deepest (dB)', 'Worst point (dB)', 'Thickness (in)', 'Req. margin (dB)'])
+        table.setColumnHidden(8, True)
         table.verticalHeader().hide()
         table.verticalHeader().setDefaultSectionSize(25)
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -64,7 +65,13 @@ class InverseResultsMixin:
         details = QPushButton('Run details…')
         details.clicked.connect(self._show_inverse_run_details)
         top.addWidget(details)
+        explain = QPushButton('Explain view')
+        explain.clicked.connect(lambda: self._show_guide('plots-inverse'))
+        top.addWidget(explain)
         layout.addLayout(top)
+        self.inv_requirement_status = QLabel()
+        self.inv_requirement_status.setWordWrap(True)
+        layout.addWidget(self.inv_requirement_status)
 
         controls = QHBoxLayout()
         self.inv_plot_view = QComboBox()
@@ -186,6 +193,9 @@ class InverseResultsMixin:
         blocker = QSignalBlocker(table)
         table.setSortingEnabled(False)
         table.setRowCount(len(self.inverse_candidates))
+        requirement = self.inverse_result_metadata.get('requirement_db')
+        table.horizontalHeaderItem(2).setText('Gap (dB)' if requirement is not None else 'Score (dB)')
+        table.setColumnHidden(8, requirement is None)
         percentile = self._current_inverse_percentile() if self.inv_curve_mode.currentIndex() else 100.
         self._inverse_curves, self._inverse_metrics = [], []
         continuous = self.inverse_result_metadata.get('band_sweep', False)
@@ -206,7 +216,8 @@ class InverseResultsMixin:
             table.setItem(index, 0, check)
             values = [index + 1, candidate.score_db, metric.coverage_pct if metric else None,
                       metric.widest_ghz if metric else None, metric.deepest_db if metric else None,
-                      metric.worst_db if metric else None, sum(candidate.thickness_in)]
+                      metric.worst_db if metric else None, sum(candidate.thickness_in),
+                      -candidate.score_db if requirement is not None else None]
             for col, value in enumerate(values, 1):
                 text = ('—' if value is None else f'#{value}' if col == 1 else
                         f'{value:.4g}' if col in (4, 7) else f'{value:.2f}')
@@ -216,7 +227,10 @@ class InverseResultsMixin:
                 if col == 1:
                     item.setToolTip(self._inverse_candidate_description(index))
                 elif col == 2:
-                    item.setToolTip('Original search objective: mean dB across frequency and angle, then worst or average across tolerance corners. Lower is better.')
+                    item.setToolTip(f'Captured search gap = worst PEC reflection − ({requirement:g} dB) across every analyzed frequency/angle/tolerance case. Lower is better; ≤ 0 passes.'
+                                    if requirement is not None else 'Original search objective: mean dB across frequency and angle, then worst or average across tolerance corners. Lower is better.')
+                elif col == 8:
+                    item.setToolTip('Captured search requirement margin = −gap. Nonnegative passes every analyzed condition. This does not change with Results target or percentile.')
                 elif col == 3:
                     item.setToolTip('Estimated fraction of the sampled band at/below target.' if continuous and len(self.inverse_plot_freqs) > 1
                                     else 'Fraction of discrete target frequencies at/below target; no bandwidth is inferred.')
@@ -254,9 +268,13 @@ class InverseResultsMixin:
         layers = []
         for i, thickness in enumerate(candidate.thickness_in):
             resistance = candidate.sheet_resistance_ohm[i]
-            name = Path(candidate.material_files[i]).name if candidate.material_files[i] else 'Sheet'
+            labels = self.inverse_result_metadata.get('layer_labels', [])
+            name = labels[i] if i < len(labels) else Path(candidate.material_files[i]).name if candidate.material_files[i] else 'Sheet' if resistance > 0 else 'Constant material'
             layers.append(f'{name}: {resistance:g} Ω/sq' if resistance > 0 else f'{name}: {thickness:.4g} in')
-        return f'#{index + 1} · ' + '; '.join(layers)
+        requirement = self.inverse_result_metadata.get('requirement_db')
+        verdict = (f'{"PASS" if candidate.score_db <= 0 else "MISS"} · margin {-candidate.score_db:+.3f} dB · '
+                   if requirement is not None else '')
+        return f'#{index + 1} · ' + verdict + '; '.join(layers)
 
     def _show_inverse_run_details(self):
         from PySide6.QtWidgets import QMessageBox
@@ -287,11 +305,17 @@ class InverseResultsMixin:
         del blocker
         self.inv_selected_description.setText(self._inverse_candidate_description(selected) if selected >= 0 else 'Select a candidate.')
         self.inv_selected_description.setToolTip(self.inv_selected_description.text())
+        requirement = self.inverse_result_metadata.get('requirement_db')
+        self.inv_requirement_status.setVisible(requirement is not None)
+        self.inv_requirement_status.setText(
+            f'Captured search requirement: PEC reflection ≤ {requirement:g} dB at every analyzed frequency, angle, and tolerance case. Gap ≤ 0 passes. Results target/percentile only changes comparison plots.'
+            if requirement is not None else '')
         continuous = self.inverse_result_metadata.get('band_sweep', False) and len(self.inverse_plot_freqs) > 1
         note = ('Band widths use linear interpolation between samples; use a finer sweep to verify narrow features.' if continuous else
                 'Discrete targets: coverage counts passing frequencies; no bandwidth between targets is inferred.')
-        self.inv_result_note.setText('History includes each completed combination. A completed run finds the best mean-dB score on the configured grid; untested values between steps are not covered.' if is_history else
-                                    note + '\nComparison covers retained candidates. Analysis ranks mean dB; increase Keep best to inspect more alternatives.')
+        ranking = 'worst-point requirement gap' if requirement is not None else 'mean reflection dB'
+        self.inv_result_note.setText(f'History includes each completed combination. A completed run minimizes {ranking} on the configured grid; untested values between steps are not covered.' if is_history else
+                                    note + f'\nComparison covers retained candidates. Analysis ranks {ranking}; increase Keep best to inspect more alternatives.')
         if self.inv_axis is None:
             return
         axis, colors = self.inv_axis, self._colors
@@ -310,7 +334,9 @@ class InverseResultsMixin:
                 axis.plot(x, best, color=colors['plot_line_angle'], linewidth=2, label='Best so far')
                 axis.set_title(f'Combination scores · {len(scores):,} unique completed designs')
                 axis.set_xlabel('Completed combination (fixed grid order)')
-                axis.set_ylabel('Scoring objective (dB; lower is better)')
+                axis.set_ylabel('Worst-point gap (dB; ≤ 0 passes)' if requirement is not None else 'Scoring objective (dB; lower is better)')
+                if requirement is not None:
+                    axis.axhline(0., color=colors['plot_text'], linestyle='--', linewidth=1, label='Requirement boundary')
                 axis.legend(fontsize=9)
             else:
                 self._inverse_plot_message('Analyze the configured combinations to see their scores.')

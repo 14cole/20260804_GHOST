@@ -10,6 +10,13 @@ import time
 import numpy as np
 
 from . import common
+from GRIM_Backend.isar.geometry import angular_bands, angular_sublooks
+from GRIM_Backend.isar.interpolation import cartesian_pair, plan_cache_bytes
+from GRIM_Backend.isar.quality import (
+    plan_isar, image_contract, psf_metrics, scene_extents,
+    aperture_mode as normalize_aperture_mode,
+)
+from GRIM_Backend.isar.operators import native_image_residual
 
 try:  # scipy.fft is multithreaded and preserves single precision
     from scipy import fft as _sp_fft
@@ -1472,7 +1479,7 @@ def _selected_data_token(
 
     RcsGrid arrays are intentionally public and may be changed in place, so an
     object id or axis-only cache key is not a safe data revision. Hashing one
-    frequency row at a time bounds temporary memory while detecting any selected
+    bounded blocks of frequency rows bounds temporary memory while detecting any selected
     sample change and also makes reuse across object-id recycling harmless. When
     a complete raw real/imaginary pair is authoritative, hash that pair instead
     of the display power/phase arrays; this mirrors ``RcsGrid.rcs_slice``.
@@ -1559,14 +1566,15 @@ def _selected_data_token(
         digest.update(
             repr((len(azimuth_indices), len(frequency_indices))).encode("ascii")
         )
-        for row_number, azimuth_index in enumerate(azimuth_indices):
-            if row_number % 16 == 0 and _cancel_requested(cancel_check):
+        rows_per_block = max(1, min(64, 1024**2 // max(1, len(frequency_indices) * source.dtype.itemsize)))
+        for row_number in range(0, len(azimuth_indices), rows_per_block):
+            if _cancel_requested(cancel_check):
                 return None
             row = np.ascontiguousarray(
                 source[
-                    int(azimuth_index),
+                    azimuth_indices[row_number:row_number + rows_per_block, None],
                     int(elevation_index),
-                    frequency_indices,
+                    frequency_indices[None, :],
                     int(polarization_index),
                 ]
             )
@@ -1933,6 +1941,8 @@ def _compute_band(
     elevation_deg: float = 0.0,
     retain_complex: bool = False,
     resident_bytes: int = 0,
+    native_diagnostics: bool = True,
+    progress=None,
     cancel_check=None,
 ):
     band_az_values = _angle_values_to_degrees(
@@ -1986,6 +1996,8 @@ def _compute_band(
     )
     prep = _preprocess_cache_get(cache_key)
     cache_hit = prep is not None
+    if progress is not None:
+        progress("Using prepared samples" if cache_hit else "Preparing measured support and regridding")
     if prep is None:
         if _cancel_requested(cancel_check):
             return "ISAR computation superseded."
@@ -2128,16 +2140,9 @@ def _compute_band(
                 if preprocess_mode == "accurate":
                     theta_input = theta.copy()
                     freq_input = np.asarray(freq_uniform, dtype=float).copy()
-                    rcs_slice, theta, freq_uniform = _pfa_regrid_cartesian(
-                        rcs_slice,
-                        theta_input,
-                        freq_input,
-                        cancel_check=cancel_check,
-                    )
-                    weights, _, _ = _pfa_regrid_cartesian(
-                        weights,
-                        theta_input,
-                        freq_input,
+                    rcs_slice, weights, theta, freq_uniform = cartesian_pair(
+                        rcs_slice, weights, theta_input, freq_input,
+                        _cartesian_pfa_axes(theta_input, freq_input),
                         cancel_check=cancel_check,
                     )
                 else:
@@ -2214,6 +2219,8 @@ def _compute_band(
     }
 
     if recon == "sparse":
+        if progress is not None:
+            progress("Solving sparse image")
         out = _compute_band_sparse_l1(
             observed, theta, freq_uniform, df_eff, unit_scale, l1_strength, l1_iters,
             sample_weights=weights, elevation_deg=elevation_deg,
@@ -2224,6 +2231,8 @@ def _compute_band(
         complex_image, x_range, y_range, sparse_diagnostics = out
         magnitude = np.asarray(np.abs(complex_image), dtype=np.float32)
     else:
+        if progress is not None:
+            progress("Forming Fourier image")
         if _cancel_requested(cancel_check):
             return "ISAR computation superseded."
         weighted_observed = observed * weights
@@ -2266,6 +2275,39 @@ def _compute_band(
             f"Likely a too-narrow azimuth selection or unit mismatch."
         )
 
+    contract = image_contract(theta - np.mean(theta), freq_uniform, float(np.mean(az_values)), elevation_deg, unit_scale)
+    if recon == "sparse":
+        psf = {"definition": "nonlinear sparse image; no fixed image PSF"}
+    else:
+        psf_key = (window_name, elevation_deg, unit_scale)
+        with _PREPROCESS_CACHE_LOCK:
+            psf = prep.get("psf_metrics", {}).get(psf_key)
+        if psf is None:
+            psf = psf_metrics(weights, _window_array(window_name, len(theta)),
+                _window_array(window_name, len(freq_uniform)), theta, freq_uniform, elevation_deg, unit_scale)
+            with _PREPROCESS_CACHE_LOCK:
+                cache = prep.setdefault("psf_metrics", {})
+                if len(cache) >= 8:
+                    cache.clear()
+                cache[psf_key] = psf
+        psf = {key: dict(value) if isinstance(value, dict) else value for key, value in psf.items()}
+    native = {"status": "not_computed", "reason": "Native residual is available for sparse point images"}
+    if recon == "sparse" and native_diagnostics:
+        if progress is not None:
+            progress("Checking sparse image against original polar samples")
+        ids = np.asarray(sorted_band_indices, dtype=np.intp)
+        fids = np.asarray(freq_indices_sorted, dtype=np.intp)
+        try:
+            native = native_image_residual(complex_image, x_range, y_range, contract,
+                band_az_values[order], freq_hz,
+                lambda ia, jf: dataset.rcs_slice((ids[ia], elev_idx, fids[jf], pol_idx)),
+                support_threshold=sparse_diagnostics.get("sparse_support_threshold", 0.), cancel_check=cancel_check)
+        except InterruptedError:
+            return "ISAR computation superseded."
+        if native.get("high_model_mismatch"):
+            native["warning"] = "Sparse convergence fits the gridded model; the original polar measurements disagree with this image."
+    elif recon == "sparse":
+        native = {"status": "not_computed", "reason": "Native diagnostics disabled by caller"}
     return {
         "az_values": az_values,
         "magnitude": magnitude,
@@ -2290,13 +2332,21 @@ def _compute_band(
         ),
         "accurate_pfa": recon == "accurate",
         "sampling": sampling,
+        "image_contract": contract,
+        "psf": psf,
+        "native_residual": native,
+        "spatial_frequency_support": {
+            "u_min_hz": contract["spatial_frequency_origin_hz"][0],
+            "u_max_hz": float(np.mean(freq_uniform) * (theta[-1] - np.mean(theta))),
+            "v_min_hz": float(freq_uniform[0]), "v_max_hz": float(freq_uniform[-1]),
+            "coverage_interpolation": "cubic_on_complete_stencils_positive_linear_near_holes" if recon == "accurate" else "positive_linear",
+        },
         **({"complex_image": complex_image} if retain_complex else {}),
     }
 
 
-# Beyond this azimuth span, a single coherent decoupled-FFT look is
-# physically invalid (rotational migration smears scatterers along arcs);
-# switch to the sub-aperture composite that wide-angle ISAR tools use.
+# Legacy automatic display policy; physical validity also depends on scene
+# size, sampling, and reconstruction. Explicit coherent PFA supports <90°.
 _COMPOSITE_SPAN_DEG = 20.0
 _COMPOSITE_SUB_DEG = 10.0
 
@@ -2491,6 +2541,10 @@ def _compute_band_composite(
     retain_complex: bool = False,
     resident_bytes: int = 0,
     az_center_deg: float | None = None,
+    composite_side: int = 1024,
+    scene_half_extent_m=None,
+    native_diagnostics: bool = True,
+    progress=None,
     cancel_check=None,
 ):
     """Stream a qualitative max-look composite of coherent narrow looks."""
@@ -2501,9 +2555,12 @@ def _compute_band_composite(
     order = np.argsort(az_vals)
     idx_sorted = [band_az_indices[i] for i in order]
     az_sorted = az_vals[order]
-    span = float(az_sorted[-1] - az_sorted[0])
-    n_sub = max(2, int(np.ceil(span / _COMPOSITE_SUB_DEG)))
-    chunks = np.array_split(np.asarray(idx_sorted, dtype=np.int64), n_sub)
+    physical_az = az_all.copy()
+    physical_az[idx_sorted] = az_sorted
+    try:
+        chunks = angular_sublooks(idx_sorted, physical_az, maximum_span=_COMPOSITE_SUB_DEG)
+    except ValueError as exc:
+        return f"Wide-aperture composite: {exc}"
     chunk_specs: list[tuple[list[int], float]] = []
     common_half = float("inf")
     for raw_chunk in chunks:
@@ -2546,10 +2603,8 @@ def _compute_band_composite(
     )
     if full_source_token is None:
         return "ISAR computation superseded."
-    composite_bytes = (
-        _COMPOSITE_SCRATCH_BYTES
-        + _COMPOSITE_GRID_SIDE * _COMPOSITE_GRID_SIDE * np.dtype(np.float32).itemsize
-    )
+    side = int(composite_side)
+    composite_bytes = 68 * side * side
     try:
         _validate_isar_working_set(
             composite_bytes,
@@ -2559,11 +2614,15 @@ def _compute_band_composite(
     except ValueError as exc:
         return f"ISAR working-set preflight blocked: {exc}"
 
-    axis = np.linspace(-common_half, common_half, _COMPOSITE_GRID_SIDE)
+    half = scene_extents(scene_half_extent_m)
+    hx, hy = (common_half, common_half) if half is None else (
+        min(common_half, half[0] * unit_scale), min(common_half, half[1] * unit_scale))
+    axis = np.linspace(-hx, hx, side)
+    y_axis = np.linspace(-hy, hy, side)
     xq = axis[:, None].astype(np.float32)
-    yq = axis[None, :].astype(np.float32)
+    yq = y_axis[None, :].astype(np.float32)
     comp = np.zeros(
-        (_COMPOSITE_GRID_SIDE, _COMPOSITE_GRID_SIDE), dtype=np.float32
+        (side, side), dtype=np.float32
     )
     az_nonuni = 0.0
     fr_nonuni = 0.0
@@ -2582,10 +2641,13 @@ def _compute_band_composite(
     sparse_max_residual = 0.0
     sparse_support_size = 0
     sparse_all_debiased = True
+    look_diagnostics = []
 
     # Form, rotate, and discard one sublook at a time.  Only the final
     # float32 composite and bounded interpolation scratch remain resident.
     for chunk, theta_c in chunk_specs:
+        if progress is not None:
+            progress(f"Forming composite look {processed_looks + 1}/{len(chunk_specs)}")
         if _cancel_requested(cancel_check):
             return "ISAR computation superseded."
         r = _compute_band(
@@ -2596,11 +2658,20 @@ def _compute_band_composite(
             az_center_deg=az_center_deg, elevation_deg=elevation_deg,
             retain_complex=False,
             resident_bytes=resident_bytes + composite_bytes,
+            native_diagnostics=native_diagnostics,
             cancel_check=cancel_check,
         )
         if isinstance(r, str):
             return r
         processed_looks += 1
+        look_half = None if half is None else (
+            abs(np.cos(theta_c))*half[0] + abs(np.sin(theta_c))*half[1],
+            abs(np.sin(theta_c))*half[0] + abs(np.cos(theta_c))*half[1])
+        look_plan = plan_isar(physical_az[chunk], freq_hz, elevation_degrees=elevation_deg,
+            scene_half_extent_m=look_half, reconstruction=recon, mode='coherent')
+        look_diagnostics.append({"sampling": r.get("sampling", {}), "psf": r.get("psf", {}),
+            "native_residual": r.get("native_residual", {}), "phase_coverage": r.get("phase_coverage", 0.),
+            "accuracy_plan": look_plan})
         az_nonuni = max(az_nonuni, r.get("az_nonuniformity", 0.0))
         fr_nonuni = max(fr_nonuni, r.get("freq_nonuniformity", 0.0))
         az_gap_fraction = max(az_gap_fraction, r.get("az_gap_fraction", 0.0))
@@ -2664,7 +2735,7 @@ def _compute_band_composite(
         "az_values": az_sorted,
         "magnitude": comp,
         "x_range": axis,
-        "y_range": axis.copy(),
+        "y_range": y_axis,
         "az_nonuniformity": az_nonuni,
         "freq_nonuniformity": fr_nonuni,
         "az_gap_fraction": az_gap_fraction,
@@ -2677,6 +2748,18 @@ def _compute_band_composite(
         "source_selection_digest": full_source_token.hex(),
         "composite": processed_looks,
         "composite_streamed": True,
+        "composite_sublooks": [
+            {"source_indices": chunk, "center_degrees": float(np.rad2deg(center)),
+             "span_degrees": float(np.ptp(physical_az[chunk])), "sample_count": len(chunk)}
+            for chunk, center in chunk_specs
+        ],
+        "composite_aggregation": "maximum_magnitude",
+        "composite_look_diagnostics": look_diagnostics,
+        "image_contract": {"version": 1, "image_plane": "horizontal", "phase_convention": "unavailable",
+            "phase_center": "dataset_fixed_origin", "amplitude_normalization": "maximum_unit_point_look_gain",
+            "image_kind": "maximum_magnitude_composite", "distance_scale_per_metre": unit_scale,
+            "cross_range_basis": [1., 0., 0.], "range_basis": [0., 1., 0.], "coordinate_signs": [1, 1]},
+        "psf": {"definition": "nonlinear max-look composite; use individual sublook PSF diagnostics"},
     }
     if retain_complex:
         result["complex_image_unavailable_reason"] = (
@@ -2708,8 +2791,16 @@ def compute_bands(params: dict):
     access — so the mixin runs it on a worker thread and the GUI stays live.
     Returns (band_results, elapsed_seconds), or an error-message string."""
     t_start = time.perf_counter()
+    if not params.get("bands"):
+        return "ISAR selection has no angular bands with at least two samples."
     band_results = []
     cancel_check = params.get("cancel_check")
+    mode = normalize_aperture_mode(params.get("aperture_mode", "auto"))
+    half = scene_extents(params.get("scene_half_extent_m"))
+    composite_side = params.get("composite_side", _COMPOSITE_GRID_SIDE)
+    if isinstance(composite_side, bool) or int(composite_side) != composite_side or not 32 <= composite_side <= 4096:
+        return "Composite grid side must be an integer between 32 and 4096."
+    progress = params.get("progress")
     for band_az_indices in params["bands"]:
         if _cancel_requested(cancel_check):
             return "ISAR computation superseded."
@@ -2722,10 +2813,13 @@ def compute_bands(params: dict):
         if params.get("az_center_deg") is not None:
             az_band = _unwrap_degrees(az_band, params["az_center_deg"])
         span = float(az_band.max() - az_band.min())
-        if span > _COMPOSITE_SPAN_DEG:
-            # A single coherent look is invalid this wide — build the
-            # sub-aperture body-frame composite instead (az-interp targets
-            # don't apply to composites and are ignored here).
+        try:
+            plan = plan_isar(az_band, params["freq_hz"], elevation_degrees=params.get("elevation_deg", 0.),
+                scene_half_extent_m=half, reconstruction=params.get("recon", "fft"), mode=mode)
+        except ValueError as exc:
+            return f"ISAR planning: {exc}"
+        recon = plan["selected_reconstruction"]
+        if plan["image_kind"] == "maximum_magnitude_composite":
             result = _compute_band_composite(
                 params["dataset"],
                 params["window_name"],
@@ -2736,13 +2830,15 @@ def compute_bands(params: dict):
                 params["freq_hz"],
                 params["df"],
                 params["unit_scale"],
-                recon=params.get("recon", "fft"),
+                recon=recon,
                 l1_strength=params.get("l1_strength", 0.05),
                 l1_iters=params.get("l1_iters", 300),
                 elevation_deg=params.get("elevation_deg", 0.0),
                 retain_complex=bool(params.get("retain_complex", False)),
                 resident_bytes=resident_bytes,
                 az_center_deg=params.get("az_center_deg"),
+                composite_side=int(composite_side), scene_half_extent_m=half,
+                native_diagnostics=params.get("native_diagnostics", True), progress=progress,
                 cancel_check=cancel_check,
             )
         else:
@@ -2758,16 +2854,27 @@ def compute_bands(params: dict):
                 params["unit_scale"],
                 az_target_deg=params["az_target_deg"],
                 az_center_deg=params.get("az_center_deg"),
-                recon=params.get("recon", "fft"),
+                recon=recon,
                 l1_strength=params.get("l1_strength", 0.05),
                 l1_iters=params.get("l1_iters", 300),
                 elevation_deg=params.get("elevation_deg", 0.0),
                 retain_complex=bool(params.get("retain_complex", False)),
                 resident_bytes=resident_bytes,
+                native_diagnostics=params.get("native_diagnostics", True), progress=progress,
                 cancel_check=cancel_check,
             )
         if isinstance(result, str):
             return result
+        result["accuracy_plan"] = plan
+        result["resolved_reconstruction"] = recon
+        result["memory_budget"] = {
+            "source_power_phase_bytes": _result_array_bytes([{"power": params["dataset"].rcs_power, "phase": params["dataset"].rcs_phase}]),
+            "retained_previous_results_bytes": resident_bytes,
+            "preparation_cache_bytes": _PREPROCESS_CACHE_BYTES, "preparation_cache_limit_bytes": _PREPROCESS_CACHE_LIMIT,
+            "geometry_plan_cache_bytes": plan_cache_bytes(), "geometry_plan_cache_limit_bytes": 8 * 1024**2,
+            "formation_limit_bytes": _ISAR_WORKING_SET_LIMIT,
+            "definition": "Formation limit bounds additional scratch and retained results; source and caches are reported separately, not total RSS.",
+        }
         if _cancel_requested(cancel_check):
             return "ISAR computation superseded."
         # Convention flips, applied to the FINAL image so they are exactly
@@ -2780,11 +2887,33 @@ def compute_bands(params: dict):
             if "complex_image" in result:
                 result["complex_image"] = result["complex_image"][::-1, :]
             result["x_range"] = -np.asarray(result["x_range"])[::-1]
+            contract = result.get("image_contract", {})
+            contract["cross_range_basis"] = [-v for v in contract.get("cross_range_basis", [1., 0., 0.])]
+            contract["coordinate_signs"][0] = -1
+            if "spatial_frequency_origin_hz" in contract:
+                contract["spatial_frequency_origin_hz"][0] *= -1
         if params.get("flip_y"):
             result["magnitude"] = result["magnitude"][:, ::-1]
             if "complex_image" in result:
                 result["complex_image"] = result["complex_image"][:, ::-1]
             result["y_range"] = -np.asarray(result["y_range"])[::-1]
+            contract = result.get("image_contract", {})
+            contract["range_basis"] = [-v for v in contract.get("range_basis", [0., 1., 0.])]
+            contract["coordinate_signs"][1] = -1
+            if "spatial_frequency_origin_hz" in contract:
+                contract["spatial_frequency_origin_hz"][1] *= -1
+        if half is not None and not result.get("composite"):
+            ix = np.flatnonzero(abs(result["x_range"]) <= half[0] * params["unit_scale"])
+            iy = np.flatnonzero(abs(result["y_range"]) <= half[1] * params["unit_scale"])
+            if len(ix) < 2 or len(iy) < 2:
+                return "Requested scene contains fewer than two image pixels on an axis; enlarge the scene extent."
+            crop = (slice(ix[0], ix[-1] + 1), slice(iy[0], iy[-1] + 1))
+            result["magnitude"] = np.ascontiguousarray(result["magnitude"][crop])
+            if "complex_image" in result:
+                result["complex_image"] = np.ascontiguousarray(result["complex_image"][crop])
+            result["x_range"] = result["x_range"][ix].copy()
+            result["y_range"] = result["y_range"][iy].copy()
+            result["scene_cropped"] = True
         # GUI rendering can reduce oversized images after formation; headless
         # callers keep the full numerical grid by disabling this parameter.
         if params.get("decimate_display", True):
@@ -2826,11 +2955,28 @@ def form_isar(
     retain_complex: bool = False,
     decimate_display: bool = False,
     legacy_metadata_attested: bool = False,
+    aperture_mode: str = "auto",
+    scene_half_extent_m=None,
+    composite_side: int = 1024,
+    native_diagnostics: bool = True,
+    cancel_check=None,
+    progress=None,
 ):
     """Form ISAR images without Qt.
 
     Returns ``(band_results, elapsed_seconds)`` using the same physical path as
-    the GUI. ``reconstruction`` accepts ``fast``, ``accurate``, or ``sparse``.
+    the GUI. ``reconstruction`` accepts ``auto``, ``fast``, ``accurate``, or ``sparse``.
+    ``auto`` uses scene-dependent sampling/curvature advice to choose a PFA.
+    ``aperture_mode`` is ``auto`` (legacy >20° max-look policy), ``coherent``
+    (<90°), or ``composite``. Each composite look is bounded to 10°; grid side
+    is configurable from 32 to 4096. ``scene_half_extent_m=(x,y)`` specifies the
+    occupied horizontal scene for planning and crops the retained image.
+    Native sampling diagnostics use acquired samples before interpolation.
+    ``native_diagnostics`` enables a bounded original-polar-data residual for
+    Sparse; it does not change that solver's gridded objective. Diagnostics,
+    support PSF cuts, and a complex phase/frame contract accompany results.
+    ``cancel_check`` is a callable returning true to stop at a processing block;
+    ``progress`` receives stage text. Callbacks run on the calling thread.
     Sparse mode is an experimental fixed-lambda LASSO image reconstruction;
     it does not perform target/contaminant separation or emit cleaned phase
     history. ``l1_strength`` must be in ``(0, 1)`` and ``l1_iterations`` is a
@@ -2894,14 +3040,16 @@ def form_isar(
         l1_strength, l1_iterations
     )
     recon_key = str(reconstruction).strip().lower()
-    if recon_key in {"accurate", "cartesian", "pfa-accurate"}:
+    if recon_key == "auto":
+        pass
+    elif recon_key in {"accurate", "cartesian", "pfa-accurate"}:
         recon_key = "accurate"
     elif recon_key in {"sparse", "l1", "sparse-l1"}:
         recon_key = "sparse"
     elif recon_key in {"fast", "fft", "pfa", "fast-pfa"}:
         recon_key = "fft"
     else:
-        raise ValueError("reconstruction must be 'fast', 'accurate', or 'sparse'")
+        raise ValueError("reconstruction must be 'auto', 'fast', 'accurate', or 'sparse'")
 
     if aperture_center_degrees is not None:
         try:
@@ -2921,7 +3069,9 @@ def form_isar(
     if aperture_center_degrees is not None or azimuth_target_degrees is not None:
         bands = [az_indices]
     else:
-        bands = [b for b in _split_into_bands(az_indices) if len(b) >= 2]
+        bands = angular_bands(az_indices, _angle_values_to_degrees(dataset, "azimuth", dataset.azimuths))
+        if any(len(b) < 2 for b in bands):
+            raise ValueError("An isolated azimuth sector has fewer than two samples; select a contiguous angular sector")
     result = compute_bands({
         "dataset": dataset,
         "bands": bands,
@@ -2947,6 +3097,9 @@ def form_isar(
         "retain_complex": bool(retain_complex),
         "decimate_display": bool(decimate_display),
         "isar_contract_assumptions": contract_assumptions,
+        "aperture_mode": aperture_mode, "scene_half_extent_m": scene_half_extent_m,
+        "composite_side": composite_side, "native_diagnostics": native_diagnostics,
+        "cancel_check": cancel_check, "progress": progress,
     })
     if isinstance(result, str):
         raise ValueError(result)

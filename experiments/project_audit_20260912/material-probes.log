@@ -1,5 +1,0 @@
-experiments/project_audit_20260912\probe_workflows.py:49: UserWarning: constrained_layout not applied because axes sizes collapsed to zero.  Try making figure larger or Axes decorations smaller.
-  app.processEvents()
-{"name": "Material Mix equal-volume numerical oracle and export", "status": "PASS", "details": {"expected_epsilon": "4-0.1j", "frequency_ghz": [9.0, 10.0, 11.0], "export": "experiments/project_audit_20260912\\material-artifacts\\equal-blend.csv"}, "seconds": 0.797}
-{"name": "Material Explorer interpolation, bounds, duplicate and malformed batch", "status": "PASS", "details": {"added": 2, "duplicates": 1, "rejected": 1, "interpolation_epsilon": "2-0.1j", "outside_range": null}, "seconds": 0.281}
-{"name": "GHOST cancellation state independent of message spelling", "status": "PASS", "details": {"messages": 3, "running_state_cleared": true, "prior_result_preserved": true, "critical_dialogs": 0}, "seconds": 0.0}

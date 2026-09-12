@@ -85,7 +85,7 @@ def sample_operator(oracle, coordinates, tile=512, checkpoint=None):
                     not np.all(np.isfinite(raw)) or not np.all(np.isfinite(tail)) or np.any(tail<0)):
                 raise ValueError('Invalid coefficient tile in compressed memory forecast.')
             raw_bytes = raw.nbytes
-            payload, reconstructed, errors, _ = tile_payload(raw, tail, 1e-14, 'qr')
+            payload, reconstructed, errors, _ = tile_payload(raw, tail, 1e-14, 'qr', probe=shell.separated(i,j))
             ratios.append(sum(a.nbytes for a in payload if a is not None)/float(raw_bytes))
             raw = tail = payload = reconstructed = errors = None
 

@@ -202,7 +202,7 @@ share an error scale. Run details keeps the approximation report, including its
 midpoint interpolation check. This analysis neither exports an IBC nor certifies
 finite-body RCS accuracy, and it does not overwrite an existing impedance run.
 
-## GHOST and Runs: reuse a 2D setup
+## GHOST: reuse a 2D setup
 
 **Boundary Densities** computes VV/HH at the first frequency and incident angle
 and opens their magnitude on the geometry in GHOST's existing plot area.
@@ -223,19 +223,73 @@ discard the out-of-date result; cancellation keeps previous results intact.
    quality settings, and the output destination. It includes thin-layer
    applicability checks. The normal solve repeats preflight before computation;
    numerical quality and convergence are determined by the actual run.
-4. **Save 2D setup…** writes a `.run.json` file. Use **Load 2D setup…** in either
-   GHOST or **Runs**. It preserves frequencies, incident angles, units, mesh
-   certification, accuracy, and LU precision. Runs passes accuracy and precision
-   to its portable HPC request and remembers them between launches.
-5. Select the geometry, output, and cluster resources in their respective tabs.
-   The shared recipe contains physics settings, without machine credentials,
-   job-submission instructions, geometry copies, or output destinations.
+4. **Save run setup…** writes a `.run.json` file. **Load run setup…** in GHOST
+   restores frequencies, incident angles, units, mesh certification, accuracy,
+   LU precision, scattering mode, quality thresholds, and execution resources.
+5. Select geometry and output locations separately. For local/HPC batches,
+   embed a saved setup as `run_setup` in the driver JSON and configure input
+   paths, output destinations, and cluster resources in the driver settings.
+   See [saved profiles](tools/GHOST/RUN_PROFILES.md) and the
+   [HPC guide](tools/GHOST/HPC.md).
 
-GHOST's 2D “Elevations” and Runs' 2D “Azimuths” are mapped to the same incident
-angle samples. BoR uses a different angle convention and is configured separately.
-Runs supports monostatic requests and default desktop quality thresholds. It
-rejects a local bistatic/custom-threshold recipe before changing any controls.
-Local GHOST can save and restore those richer 2D settings.
+The 2D batch drivers require monostatic setups with their standard quality
+thresholds. GHOST also saves and restores bistatic and custom-threshold setups.
+Conflicting or incompatible driver settings are rejected before a run starts.
+
+## GHOST: reuse a BOR setup
+
+Select BOR, open Advanced Settings, and choose the BOR factorization, aspect
+batch size, incident-basis reuse, compressed storage cap, tile size, and tile
+cache. Save or load these with **Save run setup / Load run setup**. The versioned
+BOR recipe is distinct from the existing 2D recipe and preserves CFIE alpha,
+frequencies, units, mesh certification, and accuracy as well.
+
+GHOST's angles are body aspects from +z, between 0 and 180 degrees. Local/HPC
+BoR drivers use radar azimuth/elevation plus body attitude. A saved GHOST
+recipe embedded as `run_setup` maps to azimuth 0, elevation `90 - aspect`,
+a +z body axis, and zero roll. The drivers export radar coordinates.
+
+Existing recipes containing a radar grid and body attitude remain loadable
+in GHOST: the solver uses their derived body aspects and plots in body
+coordinates. The load notice describes this conversion. Geometry and output
+paths are configured separately. Conflicting explicit driver settings are
+rejected.
+
+In GHOST, **Check geometry and run setup** validates the BOR geometry and material
+coverage over the requested frequencies and forecasts peak allocation. This
+does not assemble operators or certify the future solution. Running still
+checks linear-system, modal-tail, and selected mesh-convergence criteria.
+
+## ISAR: plan, form, inspect, and compare
+
+1. Select a stationary far-field monostatic complex dataset, one polarization,
+   one elevation, the frequency band and an angular sector. Frequency controls
+   show the dataset's units. Regular angular strides are supported.
+2. Use existing **Dataset Operations → Range Cal** for complex reference
+   calibration, and **Support Ref −** for matched support-referenced differences
+   when appropriate. These operations retain provenance; subtraction does not
+   undo coupling or shadowing. **Workflow** in ISAR connects these steps.
+3. In **ISAR Settings**, enter the occupied scene half extents in metres and
+   choose **Recommended PFA**. Set **Image mode** explicitly when a coherent
+   image or qualitative composite is required; automatic retains the legacy
+   switch above 20 degrees. Use **Plan image** to inspect native sampling,
+   curvature and memory estimates before **Apply ISAR Settings**.
+4. Review **Quality**. Coverage, nominal resolution, origin PSF cuts and sparse
+   native-data residuals answer different questions. A converged sparse solver
+   can still disagree with the original polar measurements. **Cancel** stops
+   formation at a processing block. Extra pixels and scene crops add no physical
+   resolution.
+5. **Export ISAR Result** saves full numerical arrays and diagnostics. **Save
+   recipe** saves the accepted physical selectors and formation settings. Load
+   the recipe against another compatible acquisition, inspect the plan, and
+   form again. Display changes preserve the numerical result; numerical changes
+   require a fresh formation before export.
+6. **Open result** works without the original source dataset. **Compare result**
+   offers linked physical axes and shared intensity scales, an A-minus-B map,
+   **Peak profiles**, and **Statistics in current view** for the zoomed difference
+   ROI. Different grids require explicit intensity resampling; incompatible
+   image frames or acquisition conventions are explained. These are image-level
+   dB differences, without a per-pixel dBsm/dBke calibration claim.
 
 ## Assembly: map responses and make variants
 

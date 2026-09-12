@@ -1,4 +1,6 @@
 import math
+import copy
+import threading
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -10,14 +12,14 @@ from ghost_backend.geometry.materials import (
 )
 
 try:
-    from PySide6.QtCore import Qt, Signal, QItemSelectionModel
+    from PySide6.QtCore import Qt, Signal, QItemSelectionModel, QThread
     from PySide6.QtWidgets import (
         QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
         QHeaderView, QLabel, QMessageBox, QPushButton, QSizePolicy, QSplitter,
         QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
     )
 except ImportError:
-    from PySide2.QtCore import Qt, Signal, QItemSelectionModel  # type: ignore
+    from PySide2.QtCore import Qt, Signal, QItemSelectionModel, QThread  # type: ignore
     from PySide2.QtWidgets import (  # type: ignore
         QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
         QHeaderView, QLabel, QMessageBox, QPushButton, QSizePolicy, QSplitter,
@@ -31,6 +33,7 @@ except ImportError:
     from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
     from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
+from matplotlib.collections import LineCollection
 
 from ghost_backend.geometry.io import (
     IBC_KINDS,
@@ -81,6 +84,30 @@ class MplCanvas(FigureCanvas):
         self.updateGeometry()
 
 
+class _GeometryValidationWorker(QThread):
+    ready = Signal(int, object)
+    failed = Signal(str)
+    active = set()
+
+    def __init__(self):
+        super().__init__()
+        self.abort = threading.Event()
+        self.active.add(self)
+        self.finished.connect(lambda: self.active.discard(self))
+
+    def checkpoint(self):
+        if self.abort.is_set():
+            raise InterruptedError('Validation canceled.')
+
+    def run(self):
+        try:
+            result = self.audit.run()
+            self.checkpoint()
+            self.ready.emit(self.version, result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class GeometryTab(QWidget):
     dirty_changed = Signal(bool)
 
@@ -89,6 +116,9 @@ class GeometryTab(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._validation_version = 0
+        self._validation_worker = None
+        self.geometry_changed.connect(self._cancel_validation)
         splitter = QSplitter(Qt.Horizontal)
 
         plot_container = QWidget()
@@ -301,6 +331,10 @@ class GeometryTab(QWidget):
         return True
 
     def request_close(self, parent: 'Optional[QWidget]' = None) -> 'bool':
+        if self._validation_worker is not None and self._validation_worker.isRunning():
+            self._cancel_validation()
+            self.lbl_status.setText('Canceling validation. Close again after it finishes.')
+            return False
         return self._confirm_unsaved_changes(action="closing GHOST", parent=parent)
 
     def apply_plot_theme(
@@ -1307,6 +1341,10 @@ class GeometryTab(QWidget):
         tick_len = 0.018 * diag
         ax = self.canvas.ax
 
+        arrows, arrow_colors, ticks, tick_colors = [], [], [], []
+        label_rows = set(range(len(self.segments))) if len(self.segments) <= 100 else set(sorted(self.issue_rows)[:99])
+        if self._selected_row is not None:
+            label_rows.add(self._selected_row)
         for row, seg in enumerate(self.segments):
             front_label, front_color, back_label, back_color = self._segment_side_materials(seg)
             issue = row in self.issue_rows
@@ -1323,24 +1361,12 @@ class GeometryTab(QWidget):
                 mx = 0.5 * (x1 + x2)
                 my = 0.5 * (y1 + y2)
 
-                ann = ax.annotate(
-                    "",
-                    xy=(mx + nx * arrow_len, my + ny * arrow_len),
-                    xytext=(mx, my),
-                    arrowprops={"arrowstyle": "-|>", "color": arrow_color, "lw": 0.9, "alpha": 0.85},
-                    zorder=12,
-                )
-                self.normal_artists.append(ann)
+                arrows.append((mx, my, nx * arrow_len, ny * arrow_len))
+                arrow_colors.append(arrow_color)
+                ticks.append(((mx, my), (mx - nx * tick_len, my - ny * tick_len)))
+                tick_colors.append(back_color)
 
-                (tick,) = ax.plot(
-                    [mx, mx - nx * tick_len], [my, my - ny * tick_len],
-                    color=back_color, lw=2.2, alpha=0.85, zorder=12,
-                    solid_capstyle="butt",
-                )
-                self.normal_artists.append(tick)
-
-
-            if primitives:
+            if primitives and row in label_rows:
                 x1, y1, x2, y2 = primitives[len(primitives) // 2]
                 dx, dy = x2 - x1, y2 - y1
                 length = max((dx * dx + dy * dy) ** 0.5, 1e-12)
@@ -1356,6 +1382,14 @@ class GeometryTab(QWidget):
                     zorder=13,
                 )
                 self.normal_artists.append(txt)
+
+        if arrows:
+            x, y, u, v = zip(*arrows)
+            self.normal_artists.append(ax.quiver(x, y, u, v, angles='xy', scale_units='xy',
+                scale=1, color=arrow_colors, width=.002, alpha=.85, zorder=12))
+            collection = LineCollection(ticks, colors=tick_colors, linewidths=2.2, alpha=.85, zorder=12)
+            ax.add_collection(collection)
+            self.normal_artists.append(collection)
 
     def _on_show_normals_toggled(self, checked: 'bool'):
         _ = checked
@@ -1836,290 +1870,45 @@ class GeometryTab(QWidget):
             return True
         return False
 
+    def _cancel_validation(self, *_):
+        self._validation_version += 1
+        if self._validation_worker is not None:
+            self._validation_worker.abort.set()
+
     def validate_geometry(self):
-        ibcs_rows = self._read_small_table(self.table_ibc)
-        dielectric_rows = self._read_small_table(self.table_diel)
-        diel_flags = {
-            self._parse_int_token(row[0], 0)
-            for row in dielectric_rows if row
-        }
-        ibc_flags = {
-            self._parse_int_token(row[0], 0)
-            for row in ibcs_rows if row
-        }
+        if self._validation_worker is not None:
+            self._cancel_validation()
+            self.lbl_status.setText('Canceling validation...')
+            return
+        from ghost_backend.geometry.validation import GeometryAudit
+        material_dir = os.path.dirname(os.path.abspath(self.loaded_path)) if self.loaded_path else os.getcwd()
+        worker = _GeometryValidationWorker()
+        worker.audit = GeometryAudit(copy.deepcopy(self.segments),
+            self._read_small_table(self.table_ibc), self._read_small_table(self.table_diel),
+            material_dir, worker.checkpoint)
+        worker.version = self._validation_version
+        self._validation_worker = worker
+        worker.ready.connect(self._validation_ready)
+        worker.failed.connect(self._validation_failed)
+        worker.finished.connect(self._validation_finished)
+        worker.finished.connect(worker.deleteLater)
+        self.destroyed.connect(worker.abort.set)
+        self.btn_validate.setText('Cancel validation')
+        self.lbl_status.setText('Validating captured geometry...')
+        worker.start()
 
-        findings: 'List[Tuple[str, int, str]]' = []
-        issue_rows: 'Set[int]' = set()
+    def _validation_finished(self):
+        self._validation_worker = None
+        self.btn_validate.setText('Validate')
 
-        material_dir = (
-            os.path.dirname(os.path.abspath(self.loaded_path))
-            if self.loaded_path else os.path.abspath(os.getcwd())
-        )
-        try:
+    def _validation_failed(self, message):
+        self.lbl_status.setText(message)
 
-
-            from ghost_backend.twod.solver import MaterialLibrary
-            MaterialLibrary.from_entries(
-                ibcs_rows, dielectric_rows, material_dir
-            )
-        except Exception as exc:
-            findings.append(("ERROR", -1, f"Material definition error: {exc}"))
-
-        for ibc_idx, row in enumerate(ibcs_rows):
-            if (
-                len(row) == 6
-                and str(row[1]).strip().lower() == "exp"
-            ):
-                z_parts = [
-                    self._parse_float_token(row[i], float("nan"))
-                    for i in (2, 3, 4, 5)
-                ]
-                if all(math.isfinite(value) for value in z_parts):
-                    if (
-                        z_parts[0] ** 2 + z_parts[1] ** 2 == 0.0
-                        or z_parts[2] ** 2 + z_parts[3] ** 2 == 0.0
-                    ):
-                        findings.append((
-                            "WARN", -1,
-                            f"IBCS row {ibc_idx + 1}: exp taper endpoints "
-                            "should be nonzero; prefer linear or cosine for "
-                            "PEC-limit transitions.",
-                        ))
-
-        all_points = [(x, y) for seg in self.segments for x, y in zip(seg.x, seg.y)]
-        if all_points:
-            xs = [p[0] for p in all_points]
-            ys = [p[1] for p in all_points]
-            diag = max(((max(xs) - min(xs)) ** 2 + (max(ys) - min(ys)) ** 2) ** 0.5, 1.0)
-        else:
-            diag = 1.0
-        tol = max(1e-8, 1e-6 * diag)
-
-        for row, seg in enumerate(self.segments):
-            props = self._ensure_prop_len(seg.properties, 5)
-            seg_type = self._parse_int_token(props[0], -1)
-            ibc = self._parse_int_token(props[2], 0)
-            pos_mat = self._parse_int_token(props[3], 0)
-            neg_mat = self._parse_int_token(props[4], 0)
-            primitives = self._segment_primitives(seg)
-            label = f"Row {row + 1} '{seg.name}'"
-
-            if seg_type < 1 or seg_type > 5:
-                findings.append(("ERROR", row, f"{label}: invalid TYPE '{props[0]}', expected 1..5."))
-                issue_rows.add(row)
-
-            try:
-                _parse_mesh_n_token(props[1])
-            except ValueError:
-                findings.append((
-                    "ERROR",
-                    row,
-                    f"{label}: N must be an integer; use 0 or blank for "
-                    "automatic 20-panels-per-wavelength meshing, a positive "
-                    "integer for an explicit panel count per primitive, or a "
-                    "negative integer for panels per wavelength. Current "
-                    f"value is '{props[1]}'.",
-                ))
-                issue_rows.add(row)
-
-            if not primitives:
-                findings.append(("ERROR", row, f"{label}: no line primitives found."))
-                issue_rows.add(row)
-                continue
-
-            for i, (x1, y1, x2, y2) in enumerate(primitives):
-                length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
-                if length <= tol:
-                    findings.append(("ERROR", row, f"{label}: primitive {i + 1} has near-zero length."))
-                    issue_rows.add(row)
-
-            for i in range(len(primitives) - 1):
-                _, _, ex, ey = primitives[i]
-                nx1, ny1, nx2, ny2 = primitives[i + 1]
-                d_start = ((ex - nx1) ** 2 + (ey - ny1) ** 2) ** 0.5
-                d_end = ((ex - nx2) ** 2 + (ey - ny2) ** 2) ** 0.5
-                if d_start > tol:
-                    if d_end <= tol:
-                        findings.append(
-                            ("WARN", row, f"{label}: primitive {i + 2} appears reversed relative to previous one.")
-                        )
-                    else:
-                        findings.append(("WARN", row, f"{label}: primitive {i + 1} and {i + 2} are not connected."))
-                    issue_rows.add(row)
-
-            sx, sy, _, _ = primitives[0]
-            _, _, ex, ey = primitives[-1]
-            closed = (((sx - ex) ** 2 + (sy - ey) ** 2) ** 0.5) <= tol
-
-            if closed:
-                points = [(sx, sy)] + [(x2, y2) for _, _, x2, y2 in primitives]
-                area2 = 0.0
-                for i in range(len(points) - 1):
-                    x0, y0 = points[i]
-                    x1, y1 = points[i + 1]
-                    area2 += x0 * y1 - x1 * y0
-                orient = "CCW" if area2 > 0 else "CW"
-                findings.append(("INFO", row, f"{label}: closed chain, orientation {orient}."))
-
-
-            else:
-
-
-                other_end_keys: 'Set[Tuple[int, int]]' = set()
-                for other_row, other_seg in enumerate(self.segments):
-                    if other_row == row:
-                        continue
-                    other_prims = self._segment_primitives(other_seg)
-                    if not other_prims:
-                        continue
-                    other_start_x, other_start_y, _, _ = other_prims[0]
-                    _, _, other_end_x, other_end_y = other_prims[-1]
-                    other_end_keys.add(
-                        self._point_key(other_start_x, other_start_y, tol)
-                    )
-                    other_end_keys.add(
-                        self._point_key(other_end_x, other_end_y, tol)
-                    )
-                start_connected = self._point_key(sx, sy, tol) in other_end_keys
-                end_connected = self._point_key(ex, ey, tol) in other_end_keys
-                if start_connected and end_connected:
-                    findings.append((
-                        "INFO", row,
-                        f"{label}: open chain; both ends continue into other segments.",
-                    ))
-                else:
-                    findings.append(("WARN", row, f"{label}: open chain (start/end do not close)."))
-                    if seg_type in {3, 4, 5}:
-                        issue_rows.add(row)
-
-            if ibc > 0 and ibc not in ibc_flags:
-                findings.append(("ERROR", row, f"{label}: IBC flag {ibc} is referenced but not defined in IBCS."))
-                issue_rows.add(row)
-
-            if seg_type in {3, 4, 5} and pos_mat <= 0:
-                findings.append(("ERROR", row, f"{label}: TYPE {seg_type} requires pos_mat > 0."))
-                issue_rows.add(row)
-            if pos_mat > 0 and pos_mat not in diel_flags:
-                findings.append(
-                    ("ERROR", row, f"{label}: dielectric flag pos_mat={pos_mat} is referenced but not defined.")
-                )
-                issue_rows.add(row)
-            if seg_type == 5 and neg_mat <= 0:
-                findings.append(("ERROR", row, f"{label}: TYPE 5 requires neg_mat > 0."))
-                issue_rows.add(row)
-            if neg_mat > 0 and neg_mat not in diel_flags:
-                findings.append(
-                    ("ERROR", row, f"{label}: dielectric flag neg_mat={neg_mat} is referenced but not defined.")
-                )
-                issue_rows.add(row)
-            if seg_type in {1, 2, 3, 4} and neg_mat != 0:
-                findings.append(("WARN", row, f"{label}: TYPE {seg_type} typically uses neg_mat=0."))
-                issue_rows.add(row)
-
-
-        global_primitives: 'List[Tuple[int, int, Tuple[float, float, float, float], str]]' = []
-        row_type: 'Dict[int, int]' = {}
-        for row, seg in enumerate(self.segments):
-            props = self._ensure_prop_len(seg.properties, 5)
-            seg_type = self._parse_int_token(props[0], -1)
-            row_type[row] = seg_type
-            for pidx, prim in enumerate(self._segment_primitives(seg)):
-                global_primitives.append((row, pidx, prim, seg.name))
-
-        endpoint_hits: 'Dict[Tuple[int, int], List[Tuple[int, int, int]]]' = {}
-        for row, pidx, (x1, y1, x2, y2), _name in global_primitives:
-            k1 = self._point_key(x1, y1, tol)
-            k2 = self._point_key(x2, y2, tol)
-            endpoint_hits.setdefault(k1, []).append((row, pidx, 0))
-            endpoint_hits.setdefault(k2, []).append((row, pidx, 1))
-
-        for _key, hits in endpoint_hits.items():
-            incident_rows = sorted({h[0] for h in hits})
-            if len(hits) == 1:
-                row = hits[0][0]
-                if row_type.get(row, -1) in {2, 3, 4, 5}:
-                    findings.append(
-                        ("WARN", row, f"Row {row + 1}: dangling endpoint not connected to any other primitive.")
-                    )
-                    issue_rows.add(row)
-            if len(hits) > 6:
-                row = incident_rows[0]
-                findings.append(
-                    (
-                        "WARN",
-                        row,
-                        f"Row {row + 1}: high-degree node with {len(hits)} incident primitive endpoints "
-                        "(possible non-manifold junction).",
-                    )
-                )
-                issue_rows.add(row)
-
-        max_intersections = 30
-        found_intersections = 0
-        n_prims = len(global_primitives)
-        stop_intersections = False
-        for i in range(n_prims):
-            if stop_intersections:
-                break
-            row_i, pidx_i, prim_i, name_i = global_primitives[i]
-            x1, y1, x2, y2 = prim_i
-            k_i0 = self._point_key(x1, y1, tol)
-            k_i1 = self._point_key(x2, y2, tol)
-            for j in range(i + 1, n_prims):
-                row_j, pidx_j, prim_j, name_j = global_primitives[j]
-                u1, v1, u2, v2 = prim_j
-                k_j0 = self._point_key(u1, v1, tol)
-                k_j1 = self._point_key(u2, v2, tol)
-
-                shared_endpoint = k_i0 in {k_j0, k_j1} or k_i1 in {k_j0, k_j1}
-                if shared_endpoint:
-                    continue
-                if row_i == row_j and abs(pidx_i - pidx_j) <= 1:
-                    continue
-
-                if not self._segments_intersect((x1, y1), (x2, y2), (u1, v1), (u2, v2), tol):
-                    continue
-
-                findings.append(
-                    (
-                        "ERROR",
-                        row_i,
-                        (
-                            f"Rows {row_i + 1} ('{name_i}') and {row_j + 1} ('{name_j}') have a non-endpoint "
-                            "primitive intersection."
-                        ),
-                    )
-                )
-                issue_rows.add(row_i)
-                issue_rows.add(row_j)
-                found_intersections += 1
-                if found_intersections >= max_intersections:
-                    findings.append(
-                        (
-                            "WARN",
-                            row_i,
-                            f"Intersection reporting truncated after {max_intersections} findings.",
-                        )
-                    )
-                    stop_intersections = True
-                    break
-
-
-        chain_specs: 'List[ChainSpec]' = []
-        for row, seg in enumerate(self.segments):
-            props = self._ensure_prop_len(seg.properties, 5)
-            xs, ys = self._segment_plot_xy(seg)
-            chain_specs.append(ChainSpec(
-                name=seg.name or f"segment_{row + 1}",
-                seg_type=self._parse_int_token(props[0], 2),
-                pos_mat=self._parse_int_token(props[3], 0),
-                points=list(zip(xs, ys)),
-            ))
-        for severity, chain_idx, message in check_orientation_consistency(chain_specs):
-            findings.append((severity, chain_idx, message))
-            if severity == "ERROR" and 0 <= chain_idx < len(self.segments):
-                issue_rows.add(chain_idx)
-
+    def _validation_ready(self, version, result):
+        if version != self._validation_version:
+            self.lbl_status.setText('Geometry changed during validation. Validate again for current results.')
+            return
+        findings, issue_rows = result
         self.issue_rows = issue_rows
         self._refresh_segment_styles()
         self._render_normals()

@@ -8,7 +8,7 @@ GUI and batch runs. Dense LU remains available for explicit profiles.
 
 ## Selection
 
-In GHOST or GRIM Runs, open **2D execution and resources**. New runs select
+In GHOST, open **Advanced Settings → 2D execution and resources**. New runs select
 **Compressed assembly (low RAM)**. **Use efficient defaults** restores its
 8192 MiB storage/four assembly/two BLAS thread preset. The compatible CPU streaming kernels and
 double precision are selected automatically. Save a 2D run setup to preserve
@@ -77,8 +77,7 @@ its existing safety/floor behavior.
 The forecast remains conservative about inverse ranks and repair workspaces.
 Sampled storage can differ for unsampled tiles, so the forecast is not a hard
 bound. The retained-payload checks and numerical acceptance criteria remain
-enforced. See `experiments/ghost_certification_20260910/MEMORY_ESTIMATION.md`
-for measurements and validation.
+enforced.
 
 ## Numerical behavior
 
@@ -109,12 +108,10 @@ for measurements and validation.
 
 ## Qualification and interpretation
 
-The qualification report and raw evidence are in
-`experiments/ghost_certification_20260910/REPORT.md`. They identify actual tested
-geometries, materials, frequencies, runtimes, source hashes and measurements.
-Use that scope when interpreting certification. Numerical mesh convergence does
-not certify the geometry approximation or the physical accuracy of a thin-layer
-model. These limitations continue to appear in result metadata.
+Interpret certification for the specific geometry, materials, frequencies and
+radar grid recorded in each result. Numerical mesh convergence does not certify
+the geometry approximation or the physical accuracy of a thin-layer model.
+These limitations continue to appear in result metadata.
 
 At 2 GHz, the supplied airfoil's full TE/TM, 361-angle base/fine certificate took
 178.88 seconds and sampled 577 MiB peak RSS, compared with 130.86 seconds and
@@ -126,6 +123,6 @@ Revert to the default with `GHOST_CPU_FACTORIZATION=dense`. The separate
 `hierarchical` selection retains dense A, while `auto` may fall back to global
 dense LU. The strict `compressed` selection does neither.
 
-Regression entry points include `ghost_backend/tests/test_compressed_path.py` and the
-qualification folder's `test_native_queries.py`. The implementation imports only
-ghost_backend modules; it does not import the experiments folder.
+Regression entry points include `ghost_backend/tests/test_compressed_path.py` and
+`ghost_backend/tests/test_solver_compression.py`. The implementation imports only
+ghost_backend modules.

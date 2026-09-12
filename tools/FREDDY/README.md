@@ -10,6 +10,30 @@ metal-backed impedance export can be used as a planar equivalent boundary
 condition by the companion GHOST RCS solvers when that physical approximation
 is appropriate.
 
+## File Converter
+
+Choose **File → File Converter…** in FREDDY (standalone or embedded in GRIM).
+Open or drop a CSV, TXT, DAT, ASC, ASCII, or TSV table. The preview supports
+comma, tab, semicolon, and whitespace delimiters, optional headers, skipped
+preamble lines, UTF-8/BOM and Windows-1252 text, and Fortran `D` exponents.
+Blank lines and full-line `#`, `%`, `!`, and `//` comments are ignored.
+
+Each output row lets you label a variable, choose its source column or a
+constant for every row, and select its input/output units. Uncheck unwanted
+columns. Frequency conversion supports Hz, kHz, MHz, GHz, and THz in both
+directions; angles support degrees/radians, with length, time and impedance
+units also available. **As written** preserves a column without conversion.
+No frequency unit is inferred from the size of a number.
+
+Use **Preview conversion**, then **Convert and save…** to write a new table.
+Converted headers include units, such as `frequency_ghz`. All rows are checked
+before the output is published; a failure leaves an existing output untouched.
+The source cannot be used as the destination. For a FREDDY material file,
+label columns `frequency`, `eps_real`, `eps_imag`, `mu_real`, `mu_imag`, choose
+Hz output for frequency, and select comma output. Missing relative permeability
+columns can be constants `1` and `0`. The resulting header is
+`frequency_hz,eps_real,eps_imag,mu_real,mu_imag`.
+
 ## Launch
 
 FREDDY is available as the **FREDDY** tab in the main GRIM window. From the
@@ -21,13 +45,47 @@ grim
 ```
 
 The embedded tab and standalone window use the same authoritative code in
-this directory. Inverse Design supports **Stop and keep best**; other FREDDY
-background jobs run to completion. GRIM prevents closing while a job is running.
+this directory. Inverse Design supports **Stop and keep best** and resume;
+Material Mix supports stopping with incomplete results discarded.
+**Sensitivity & Yield** supports stopping while retaining the previous completed study. Ordinary
+analysis/export jobs run to completion. GRIM prevents closing while a job is running.
+
+**User-defined constant layers:** choose **Add Layer → Material source →
+Constant εr / μr (all frequencies)**. Enter the four relative-property components
+(εr real/imaginary and μr real/imaginary) and thickness. For example, εr = 6 − 0.8j
+and μr = 1 − 0.1j means inputs `6`, `-0.8`, `1`, `-0.1`. Negative imaginary values
+represent passive loss. Values must be finite and the complex ε/μ magnitudes
+must be nonsingular, using the same validation as material CSVs. These isotropic
+values are applied directly at every frequency and saved in the project; no
+temporary material CSV is created. Constant and measured layers can share a
+stack. Impedance, Off Angle, Thickness, IBC Batch, inverse design, and coating
+checks support both. Material Explorer continues to inspect measured CSVs.
 
 **About & Guide** is the single home for application help, angle and polarization
-conventions, material definitions, result metrics, and the optimization guide.
-It fills the workspace without layer controls or plots. File and View actions
-remain in the menu bar.
+conventions, material definitions, and result interpretation. Search its topic
+list for a plot or task. Eight mode-specific workflows explain setup, the
+expected response, how to make a decision, and the next step. Plot catalogs
+cover sweep/IBC views, inverse candidates, blend targets, and Material Explorer.
+**F1** opens the active mode's workflow; **Explain view** in sweep and inverse
+Results opens its plot catalog. Workflow links open Setup while preserving
+inputs and completed results. The guide fills the workspace without layer
+controls or plots. File and View actions remain in the menu bar.
+
+Analysis Results also offer **Export comparison CSV…** in the plot toolbar.
+The report includes every sampled thickness/angle, reflection basis and bound,
+target/band, passing bandwidth and coverage, worst reflection, passing margin,
+full-sweep sampled null frequency, output path, and captured run/stack context.
+The sortable **Margin (dB)** column is target minus worst reflection: a
+nonnegative value passes the entire selected band. Span displays compare nominal
+reflection. These reports are analysis records, not nominal IBC inputs. Figure
+display reduction and table sorting do not change exported samples or row identity.
+
+Dense Off Angle and Thickness sweeps retain NumPy grids and update tolerance
+bounds in place instead of repeatedly boxing arrays into Python lists. Shared
+material paths are read once per stack load and refreshed on each later run.
+Unchanged comparison tables and nominal band metrics are reused during plot
+changes. The public computation API still returns lists unless array output is
+explicitly requested.
 
 For a standalone window on Windows, double-click `Launch_FREDDY_GUI.bat` or
 run the following from this directory:
@@ -98,7 +156,7 @@ frequency_hz,eps_real,eps_imag,mu_real,mu_imag
 Use a `.csv` extension. Both tools accept UTF-8 with or without a BOM, blank
 lines, and full-line `#` comments. Header names and order must match the example;
 surrounding cell whitespace is ignored. Space/tab-separated and headerless
-files are rejected. See the [shared file format](../../MATERIAL_CSV_FORMAT.md).
+files are rejected. See the [shared file format](../GHOST/MATERIAL_CSV_FORMAT.md).
 
 Frequency is in Hz. FREDDY and GHOST use the `e^(+j omega t)` convention, so a
 passive lossy material has negative imaginary permittivity and permeability.
@@ -120,6 +178,70 @@ Uncertainty bounds are written to a separate `_uncertainty.csv` analysis file
 so the nominal file remains directly readable by GHOST. Phase uncertainty
 bounds are unwrapped about the nominal phase and can therefore lie outside
 `[-180, 180]`; this avoids false 360-degree spans at the phase branch cut.
+
+## Per-layer sensitivity and modeled yield
+
+**Sensitivity & Yield** evaluates the current PEC-backed stack. To study an
+inverse candidate, first **Apply Selected** in Inverse Design. Define the
+frequency/angle grid, choose TE, TM, or Both, and enter a reflection limit.
+The inverse-copy button transfers the inverse Setup band, angles, polarization
+and requirement; it does not apply a candidate or copy completed results.
+
+Each layer has separate bounds for thickness, signed ε′, ε″, μ′, μ″, or sheet
+resistance. Zero disables a parameter. Bounds can be percentages of the
+nominal component's magnitude or absolute values (inches, Ω/sq, or relative
+properties). A trial uses the same normalized deviation across the full
+material curve. Directional layers use the selected principal-axis properties
+and retain the existing restrictions on oblique incidence.
+
+Start with **Sensitivity only**. FREDDY varies one parameter at a time over
+an odd, evenly spaced grid including nominal and both tolerance endpoints.
+The **Sensitivity ranking** orders parameters by the largest loss of
+whole-region margin. **Parameter tolerance sweep** plots that margin against
+signed deviation. The table reports the first outward pass/miss bracket as
+a fraction of the entered bound. Refine these sweeps before treating a narrow
+feature as resolved; individual bounds are not joint tolerance guarantees.
+
+Choose **Sensitivity + statistical trials** to simulate all inputs together:
+
+- **Uniform:** values within the entered symmetric bounds.
+- **Truncated normal (±3σ):** underlying standard deviation is bound/3;
+  samples are truncated at the entered hard bounds.
+- **Shared group:** matching names share a Gaussian manufacturing factor.
+  The latent correlation of two inputs is the product of their loadings.
+  Loadings +1/+1 move together, +1/−1 move oppositely, and a blank group is
+  independent. Pearson correlations after bounded distribution transforms
+  can differ from those latent correlations. Groups supply a common-factor
+  model, not an arbitrary measured covariance matrix.
+
+Statistical trials use a seeded scrambled Sobol sequence with a power-of-two
+count (16–65,536), streamed in small batches without skipping or thinning.
+Materials are interpolated once; each trial retains its margin while failure
+counts accumulate by frequency, angle and polarization. No trial-by-grid
+response cube is retained. Setup reports workload and an approximate analysis
+array allowance, excluding loaded files, Python/Qt, plotting and export overhead.
+
+**Margin distribution** shows each simulated stack's whole-region margin.
+Margin ≥0 passes every sampled frequency, angle and selected polarization.
+**Failure map** instead shows the percentage of trials failing at each point.
+**Yield convergence** tracks the modeled whole-region pass fraction as the
+sample count grows. This is conditional on the supplied distributions,
+correlations and sampled operating points; it is not measured production yield
+or a binomial confidence interval. Repeat seeds and refine the operating grid
+to assess stability.
+
+Bounds admitting gain, nonpositive thickness/resistance, or singular ε/μ are
+rejected before sampling. Percentage variation of a zero component is also
+rejected as ineffective. Symmetric absolute variation about zero imaginary
+loss would admit gain; use a justified nominal material and passive bounds.
+
+Inputs persist in projects and follow their layer through edits, reordering,
+and inverse-candidate application. **Export study JSON** atomically saves
+captured layer inputs, grid, requirement, sensitivities, trial margins, failure
+counts, seed, sampling model, versions and material/implementation fingerprints.
+Editing Setup does not relabel completed results. Stop or an error preserves
+the previous successful result; loading a project clears results, as in other
+FREDDY workflows. Figure export is available through the plot toolbar.
 
 ## Thickness-batch IBC export
 
@@ -224,13 +346,31 @@ Band coverage and the widest contiguous passing interval are estimated by
 linear interpolation in dB on the sampled sweep, without extrapolation.
 Discrete targets report point coverage only, with no inferred bandwidth.
 These are display metrics for retained candidates; the search continues to
-rank its original mean-dB objective. Increase **Keep best** to review more
+rank its captured objective. Increase **Keep best** to review more
 alternatives and use a finer frequency sweep to verify narrow features.
 
 Analysis history shows every completed combination and the running best score,
 including work preserved by Resume. A complete run finds the best selected
-mean-dB objective on the specified finite grid, not between grid values or under
+objective on the specified finite grid, not between grid values or under
 untested conditions. A partial run is explicitly incomplete.
+
+For a requirement over the full requested region, choose **Whole-band PEC
+reflection requirement (worst point)** under Score and enter **Reflection limit
+(dB)**. The objective minimizes `max(reflection_dB) − target_dB` across every
+requested frequency, incidence angle, and nominal/tolerance case. Lower is
+better; **Gap ≤ 0 passes**, and **Req. margin = −Gap**. A flat −11 dB design
+therefore beats a −40/−1 dB narrow-null design against a −10 dB limit, even though
+the narrow-null design has a better mean. The original mean objectives remain
+available and keep their default behavior.
+
+The captured search requirement appears in Results. Its gap and margin remain
+fixed when the display target or percentile changes. Discrete targets apply the
+limit at each requested point, without claiming an intervening band. Refine the
+frequency/angle grid to verify between samples. Search recovery and candidate
+application/save validate the objective, active limit, and constant properties;
+changed inputs require a fresh search. Recovery files from older solver code
+are rejected by the existing implementation fingerprint check; saved projects
+remain loadable.
 
 The selected candidate also has an angle/frequency map and a tolerance envelope
 at a selected angle. The run retains explicit angle/tolerance labels for these

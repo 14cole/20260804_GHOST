@@ -1,9 +1,8 @@
 # Further 2D solve time and RAM reductions
 
-The subsequent [efficiency implementation](EFFICIENCY_IMPLEMENTATION.md)
-replaces batch SVD with shared bounded QR, extends direct assembly to other
-formulations, and reduces kernel, compression and residual work. The measurements
-and SVD description below document the earlier implementation.
+Current execution controls and bounded QR sweep behavior are documented in
+[TWOD_PIPELINE.md](TWOD_PIPELINE.md) and [COMPRESSED_CPU.md](COMPRESSED_CPU.md).
+The measurements and SVD description below describe an earlier implementation.
 
 Implemented September 10, 2026. These changes follow MATRIX_PIPELINE_UPDATES.md.
 They preserve the mesh, linear Galerkin basis, material equations, requested
@@ -140,34 +139,10 @@ requires a separate compressed or matrix-free operator representation.
 Hypersingular and S/K quadrature still have separate passes; merging those
 passes requires reconciling their different near/far quadrature contracts.
 
-## Validation and evidence
+## Regression coverage
 
-- 133 existing/new regression tests passed across physics, resonance, material
-  mixtures, sheets, thin layers, matrix reuse, certification, cancellation,
-  memory, runtime, and headless execution.
-- 17 physical-reference tests passed with hierarchical mode forced, including
-  the PEC interior resonance, dielectric reciprocity, and thin-layer bulk
-  references. A small-system storage-floor issue discovered in this run was
-  fixed in both factor construction and memory planning.
-- 27 pipeline/compression/experimental checks passed on actual Python 3.6.8,
-  NumPy 1.14.3, SciPy 1.0.0. The final ten compression tests passed on both
-  modern and legacy runtimes after the last changes.
-- Independent saved-backend comparisons covered 14 material configurations,
-  TE/TM, 361-angle monostatic and rectangular bistatic fields. Maximum
-  peak-scaled complex-field differences were below 1.4e-14 for these fixtures.
-- The standalone HPC scheduling suite completed with zero failures, including
-  real workers, output attestation, restart, and resume.
-
-The checks exercise all supported boundary families. Previously unsupported
-material combinations remain unsupported; this change does not add missing
-physical coupling models.
-
-[Comparison results](C:/Users/14col/Documents/ChatGPT/GHOST_FREDDY_GRIM/solver-next-updates-2026-09-10/comparison-results.json),
-[10 GHz resource plans](C:/Users/14col/Documents/ChatGPT/GHOST_FREDDY_GRIM/solver-next-updates-2026-09-10/resource-results.json),
-[regression log](C:/Users/14col/Documents/ChatGPT/GHOST_FREDDY_GRIM/solver-next-updates-2026-09-10/regression-tests.log),
-[compression tests](ghost_backend/tests/test_solver_compression.py).
-
-Algorithm background: the low-rank block/recursive inverse approach follows
-the general family described in SIAM's
-[Fast Direct Solvers for Elliptic PDEs](https://epubs.siam.org/doi/book/10.1137/1.9781611976045).
-The numerical evidence above comes from this implementation and its tests.
+The maintained [compression tests](ghost_backend/tests/test_solver_compression.py)
+cover matrix reconstruction, solve accuracy, storage limits, fallback and
+cancellation. Physical-reference tests remain in `ghost_backend/tests`.
+Previously unsupported material combinations remain unsupported; these
+execution options do not add missing physical coupling models.

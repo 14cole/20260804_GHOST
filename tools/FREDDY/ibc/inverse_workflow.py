@@ -10,7 +10,9 @@ from pathlib import Path
 import threading
 
 from .compute import build_uncertainty_scales, make_frequency_sweep, make_sweep, validate_incidence_angle
-from .io import read_material_table, save_project_file
+from .io import read_material_table, save_project_file, constant_material_from_layer, CONSTANT_VALUE_FIELDS
+from .compute import layer_material_label
+from .ui_options import inverse_requirement_target
 from .compute import validate_sweep_coverage
 from .inverse_grid import DesignGrid, NumericChoices
 
@@ -44,11 +46,11 @@ def configure_layers(layers, rows):
     return result
 
 
-def search_identity(layers, frequencies, angles, polarization, uncertainty, score_mode):
+def search_identity(layers, frequencies, angles, polarization, uncertainty, score_mode, requirement_db=-10.):
     """Hash physics inputs, not run budget, display choices, or output paths."""
     sources = {}
     for index, layer in enumerate(layers,1):
-        if layer.is_sheet:
+        if layer.is_sheet or layer.is_constant:
             continue
         for raw in [layer.file_0deg] + ([layer.file_90deg] if layer.anisotropic else []):
             path = Path(raw).resolve()
@@ -60,10 +62,25 @@ def search_identity(layers, frequencies, angles, polarization, uncertainty, scor
             except OSError as exc:
                 raise ValueError(f'Layer {index}: cannot read material file {path}: {exc}') from exc
             sources[str(path)] = digest.hexdigest()
-    value = {'layers': [asdict(l) for l in layers], 'frequencies': frequencies,
+    serialized_layers = []
+    for layer in layers:
+        fields = asdict(layer)
+        fields.pop('tolerances', None)  # Manufacturing study controls do not change this search.
+        if layer.is_constant:
+            constant_material_from_layer(layer)
+            fields['file_0deg'] = fields['file_90deg'] = ''
+        else:
+            # Preserve the established identity of legacy file/sheet layers.
+            for key in ('material_source', *CONSTANT_VALUE_FIELDS):
+                fields.pop(key)
+        serialized_layers.append(fields)
+    value = {'layers': serialized_layers, 'frequencies': frequencies,
              'angles': angles, 'polarization': polarization.strip().lower(), 'uncertainty': asdict(uncertainty),
              'score_mode': score_mode, 'sources': sources,
              'method': 'all-combinations-v1'}
+    requirement = inverse_requirement_target(score_mode, requirement_db)
+    if requirement is not None:
+        value['requirement_db'] = requirement
     return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
@@ -86,6 +103,12 @@ def check_layers(layers, frequencies, *, materials=True):
         except ValueError as exc:
             errors.append(f'Layer {index}: {str(exc).removeprefix("Layer 1: ")}')
         if materials and not layer.is_sheet:
+            if layer.is_constant:
+                try:
+                    constant_material_from_layer(layer)
+                except ValueError as exc:
+                    errors.append(f'Layer {index}: {exc}')
+                continue
             for axis, raw in [('0 deg / isotropic', layer.file_0deg)] + ([('90 deg', layer.file_90deg)] if layer.anisotropic else []):
                 try:
                     table = read_material_table(Path(raw))
@@ -225,7 +248,7 @@ class InverseWorkflowMixin:
         for i, layer in enumerate(self.layers):
             lo, hi, step = ((layer.inv_rs_min, layer.inv_rs_max, layer.inv_rs_accuracy) if layer.is_sheet
                             else (layer.inv_t_min_in, layer.inv_t_max_in, layer.inv_t_accuracy_in))
-            label = f'{i+1}. ' + ('Sheet resistance (Ω/sq)' if layer.is_sheet else Path(layer.file_0deg).name + ' — thickness (in)')
+            label = f'{i+1}. ' + ('Sheet resistance (Ω/sq)' if layer.is_sheet else layer_material_label(layer) + ' — thickness (in)')
             nominal = layer.sheet_resistance if layer.is_sheet else layer.thickness_in
             for col, value in [(0, label), (2, f'{nominal:g}')]:
                 item = QTableWidgetItem(value)
@@ -279,6 +302,7 @@ class InverseWorkflowMixin:
             layers, freqs, angles, cfg = self._inverse_setup_values()
             if int(self.inv_top_n_var.get()) <= 0:
                 raise ValueError('Keep best must be a positive integer.')
+            inverse_requirement_target(self.inv_score_mode_var.get(), self.inv_requirement_db_var.get())
         except Exception as exc:
             self.inv_setup_status.setText(str(exc))
             return
@@ -394,6 +418,6 @@ class InverseWorkflowMixin:
             raise ValueError('Run the search before applying or saving a candidate.')
         layers, freqs, angles, cfg = self._inverse_setup_values()
         identity = search_identity(layers, freqs, angles, self.inv_wave_pol_var.get(), cfg,
-                                   self.inv_score_mode_var.get())
+                                   self.inv_score_mode_var.get(), self.inv_requirement_db_var.get())
         if identity != self._inverse_result_identity:
             raise ValueError('Stack, targets, tolerances, or material files changed. Analyze the updated setup before using these candidates.')

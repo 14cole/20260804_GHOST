@@ -1,8 +1,9 @@
-"""Saved 2D profile exchange between GHOST and the Runs workspace."""
+"""GHOST saved 2D profiles preserve physics and execution resources."""
 import copy
 import os
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -12,8 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools/GHOST'))
 from PySide6.QtWidgets import QApplication
 from ghost_backend.execution.options import validate_options, efficient_defaults, geometry_preset
 from ghost_backend.ui.app import GhostWorkspace
-from GRIM_Backend.runs.workspace import RunsWorkspace
-from test_runs_workspace import _MemorySettings
+from ghost_backend.runs.setup import read_setup, save_setup
 
 
 class ExecutionProfilesUI(unittest.TestCase):
@@ -21,16 +21,21 @@ class ExecutionProfilesUI(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.path = Path(temporary.name) / 'profile.run.json'
+
     def test_presets_switch_atomically_and_preserve_physics_and_host_constraints(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             ghost = GhostWorkspace()
-            settings = _MemorySettings()
-            runs = RunsWorkspace(settings=settings)
-            restored = None
+            receiver_window = GhostWorkspace()
+            receiver = receiver_window.solver_tab
+            restored_window = None
             try:
                 tab = ghost.solver_tab
                 self.assertEqual(tab.geometry_preset_combo.currentData(), 'large')
-                self.assertEqual(runs.geometry_preset_combo.currentData(), 'large')
+                self.assertEqual(receiver.geometry_preset_combo.currentData(), 'large')
                 tab.cmb_accuracy_target.setCurrentIndex(tab.cmb_accuracy_target.findData('tight'))
                 tab.chk_mesh_certification.setChecked(False)
                 tab.execution_options_widget.set_value(dict(efficient_defaults(),
@@ -45,11 +50,13 @@ class ExecutionProfilesUI(unittest.TestCase):
                         self.assertEqual(recipe[key], value)
                     self.assertEqual(recipe['accuracy'], 'tight')
                     self.assertFalse(recipe['mesh_certification'])
-                    runs._apply_saved_run_setup(recipe)
-                    self.assertEqual(runs.geometry_preset_combo.currentData(), name)
-                    self.assertEqual(runs._capture_run_setup(), recipe)
-                runs.save_settings()
-                restored = RunsWorkspace(settings=settings)
+                    receiver._apply_saved_run_setup(recipe)
+                    self.assertEqual(receiver.geometry_preset_combo.currentData(), name)
+                    self.assertEqual(receiver._capture_run_setup(), recipe)
+                save_setup(self.path, receiver._capture_run_setup())
+                restored_window = GhostWorkspace()
+                restored = restored_window.solver_tab
+                restored._apply_saved_run_setup(read_setup(self.path))
                 self.assertEqual(restored.geometry_preset_combo.currentData(), 'small')
                 self.assertEqual(restored._capture_run_setup(), recipe)
                 restored.geometry_preset_combo.setCurrentIndex(restored.geometry_preset_combo.findData('balanced'))
@@ -60,15 +67,15 @@ class ExecutionProfilesUI(unittest.TestCase):
                     self.assertEqual(item.geometry_preset_combo.currentIndex(), -1)
                     self.assertIn('Custom', item.geometry_preset_combo.placeholderText())
                 custom = tab._capture_run_setup()
-                runs._apply_saved_run_setup(custom)
-                self.assertEqual(runs.geometry_preset_combo.currentIndex(), -1)
-                self.assertEqual(runs._capture_run_setup(), custom)
+                receiver._apply_saved_run_setup(custom)
+                self.assertEqual(receiver.geometry_preset_combo.currentIndex(), -1)
+                self.assertEqual(receiver._capture_run_setup(), custom)
                 tab.execution_options_widget.temp_edit.setText('relative/path')
                 self.assertEqual(tab.geometry_preset_combo.currentIndex(), -1)
                 with self.assertRaises(ValueError):
                     tab._capture_run_setup()
             finally:
-                for widget in (ghost, runs, restored):
+                for widget in (ghost, receiver_window, restored_window):
                     if widget is not None:
                         widget.close()
                         widget.deleteLater()
@@ -77,7 +84,8 @@ class ExecutionProfilesUI(unittest.TestCase):
     def test_presets_respect_busy_bistatic_and_bor_modes(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             ghost = GhostWorkspace()
-            runs = RunsWorkspace(settings=_MemorySettings())
+            receiver_window = GhostWorkspace()
+            receiver = receiver_window.solver_tab
             try:
                 tab = ghost.solver_tab
                 tab._set_solving_state(True)
@@ -98,7 +106,7 @@ class ExecutionProfilesUI(unittest.TestCase):
                 self.assertFalse(tab.geometry_preset_combo.isEnabled())
                 self.assertEqual(tab._capture_run_setup(), bistatic)
                 tab.cmb_scatter_mode.setCurrentIndex(0)
-                for item, solver in ((tab, tab.cmb_solver_kind), (runs, runs.solver_combo)):
+                for item, solver in ((tab, tab.cmb_solver_kind), (receiver, receiver.cmb_solver_kind)):
                     item.geometry_preset_combo.setCurrentIndex(item.geometry_preset_combo.findData('large'))
                     solver.setCurrentIndex(solver.findData('bor'))
                     self.assertFalse(item.geometry_preset_combo.isEnabled())
@@ -110,17 +118,18 @@ class ExecutionProfilesUI(unittest.TestCase):
                     self.assertEqual(item._capture_run_setup()['solver_method'], 'experimental_cpu')
             finally:
                 ghost.close()
-                runs.close()
+                receiver_window.close()
                 ghost.deleteLater()
-                runs.deleteLater()
+                receiver_window.deleteLater()
                 self.app.processEvents()
 
     def test_advanced_controls_are_collapsed_without_changing_the_setup(self):
         ghost = GhostWorkspace()
-        runs = RunsWorkspace(settings=_MemorySettings())
+        receiver_window = GhostWorkspace()
+        receiver = receiver_window.solver_tab
         try:
             tab = ghost.solver_tab
-            for item in (tab, runs):
+            for item in (tab, receiver):
                 before = item._capture_run_setup()
                 advanced = item.advanced_settings_widget
                 self.assertTrue(advanced.isHidden())
@@ -151,48 +160,50 @@ class ExecutionProfilesUI(unittest.TestCase):
             self.assertIn('Aspect', tab.lbl_angle_sweep.text())
         finally:
             ghost.close()
-            runs.close()
+            receiver_window.close()
             ghost.deleteLater()
-            runs.deleteLater()
+            receiver_window.deleteLater()
             self.app.processEvents()
 
     def test_new_windows_use_efficient_defaults_and_saved_dense_can_be_restored(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             ghost = GhostWorkspace()
-            settings = _MemorySettings()
-            runs = RunsWorkspace(settings=settings)
-            restored = None
+            receiver_window = GhostWorkspace()
+            receiver = receiver_window.solver_tab
+            restored_window = None
             try:
                 expected = efficient_defaults()
-                for tab in (ghost.solver_tab,runs):
+                for tab in (ghost.solver_tab,receiver):
                     self.assertEqual(tab.execution_options_widget.value(), expected)
                     recipe = tab._capture_run_setup()
                     self.assertEqual(recipe['solver_method'], 'experimental_cpu')
                     self.assertEqual(recipe['lu_precision'], 'double')
                     self.assertTrue(recipe['mesh_certification'])
-                recipe = runs._capture_run_setup()
+                recipe = receiver._capture_run_setup()
                 recipe.update(solver_method='direct', lu_precision='mixed',
                               execution_options=validate_options(dict(factorization='dense', blas_threads=1)))
-                runs._apply_saved_run_setup(recipe)
-                runs.save_settings()
-                restored = RunsWorkspace(settings=settings)
+                receiver._apply_saved_run_setup(recipe)
+                save_setup(self.path, receiver._capture_run_setup())
+                restored_window = GhostWorkspace()
+                restored = restored_window.solver_tab
+                restored._apply_saved_run_setup(read_setup(self.path))
                 self.assertEqual(restored._capture_run_setup(), recipe)
                 restored.execution_options_widget.defaults_button.click()
                 self.assertEqual(restored.execution_options_widget.value(), expected)
-                self.assertEqual(restored.run_method_combo.currentData(), 'experimental_cpu')
-                self.assertEqual(restored.run_lu_combo.currentData(), 'double')
+                self.assertEqual(restored.cmb_solver_method.currentData(), 'experimental_cpu')
+                self.assertEqual(restored.cmb_lu_precision.currentData(), 'double')
             finally:
-                for widget in (ghost,runs,restored):
+                for widget in (ghost, receiver_window, restored_window):
                     if widget is not None:
                         widget.close()
                         widget.deleteLater()
                 self.app.processEvents()
 
-    def test_ghost_runs_and_preferences_preserve_complete_profile(self):
+    def test_saved_file_preserves_complete_profile(self):
         ghost = GhostWorkspace()
-        settings = _MemorySettings()
-        runs = RunsWorkspace(settings=settings)
-        restored = None
+        receiver_window = GhostWorkspace()
+        receiver = receiver_window.solver_tab
+        restored_window = None
         try:
             tab = ghost.solver_tab
             profile = validate_options(dict(factorization='compressed', ram_budget_gib=4.250000017,
@@ -203,13 +214,15 @@ class ExecutionProfilesUI(unittest.TestCase):
             recipe = tab._capture_run_setup()
             self.assertEqual(recipe['solver_method'], 'experimental_cpu')
             self.assertEqual(recipe['lu_precision'], 'double')
-            runs._apply_saved_run_setup(recipe)
-            self.assertEqual(runs._capture_run_setup(), recipe)
-            self.assertTrue(runs.save_settings())
+            receiver._apply_saved_run_setup(recipe)
+            self.assertEqual(receiver._capture_run_setup(), recipe)
+            save_setup(self.path, receiver._capture_run_setup())
             with mock.patch.dict(os.environ, {'GHOST_CPU_FACTORIZATION': 'dense'}):
-                restored = RunsWorkspace(settings=settings)
+                restored_window = GhostWorkspace()
+                restored = restored_window.solver_tab
+                restored._apply_saved_run_setup(read_setup(self.path))
             self.assertEqual(restored.execution_options_widget.value(), profile)
-            self.assertEqual(restored.run_method_combo.currentData(), 'experimental_cpu')
+            self.assertEqual(restored.cmb_solver_method.currentData(), 'experimental_cpu')
             before = tab._capture_run_setup()
             invalid = copy.deepcopy(recipe)
             invalid['execution_options']['blas_threads'] = 0
@@ -220,11 +233,11 @@ class ExecutionProfilesUI(unittest.TestCase):
             dense['execution_options']['factorization'] = 'dense'
             dense.update(solver_method='direct', lu_precision='mixed')
             tab._apply_saved_run_setup(dense)
-            runs._apply_saved_run_setup(dense)
+            receiver._apply_saved_run_setup(dense)
             self.assertEqual(tab._capture_run_setup(), dense)
-            self.assertEqual(runs._capture_run_setup(), dense)
+            self.assertEqual(receiver._capture_run_setup(), dense)
         finally:
-            for widget in (ghost, runs, restored):
+            for widget in (ghost, receiver_window, restored_window):
                 if widget is not None:
                     widget.close()
                     widget.deleteLater()

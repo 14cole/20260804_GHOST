@@ -83,7 +83,7 @@ from GRIM_Backend.ui.dataset_dialogs import (
     DatasetProvenanceDialog,
     DecimateDialog,
     ExportCsvDialog,
-    ExtrusionLengthDialog,
+    ExtrusionConversionDialog,
     InterpolateDialog,
     MedianizeDialog,
     RangeCalibrationDialog,
@@ -91,7 +91,7 @@ from GRIM_Backend.ui.dataset_dialogs import (
     RoundDialog,
     ShiftDialog,
     StatisticsDialog,
-    StitchDialog,
+    JoinDialog,
     SupportReferenceDifferenceDialog,
     WedgeConicDialog,
     WrapDialog,
@@ -376,6 +376,7 @@ class DatasetOpsMixin:
         self._background_worker_name = ""
         self._pending_join_names: list[str] | None = None
         self._pending_join_references: list[DatasetReference] | None = None
+        self._pending_join_tolerance = 1.0e-6
         self._pending_range_record: dict[str, object] | None = None
         self._pending_callable_completion = None
         self._pending_import_batches: list[tuple[tuple[str, ...], int]] = []
@@ -383,11 +384,15 @@ class DatasetOpsMixin:
         self._active_import_keys: set[str] = set()
         self._import_cycle_results: list[tuple[str, bool]] = []
         self._last_import_summary = ""
+        self._pending_table_mappings: list[dict[str, object]] = []
+        self._table_mapping_active = False
 
     def _background_job_active(self) -> bool:
         self._ensure_background_worker_state()
         thread = self._background_worker_thread
-        return isinstance(thread, QThread) and thread.isRunning()
+        return bool(getattr(self, "_table_mapping_active", False)) or (
+            isinstance(thread, QThread) and thread.isRunning()
+        )
 
     def _set_background_progress(
         self,
@@ -583,12 +588,13 @@ class DatasetOpsMixin:
         self._background_worker_thread = None
         self._background_worker = None
         self._background_worker_name = ""
-        self._active_import_keys.clear()
         self._clear_background_progress()
         cancel_button = getattr(self, "btn_dataset_cancel", None)
         if cancel_button is not None:
             cancel_button.setVisible(False)
             cancel_button.setEnabled(True)
+        self._prompt_pending_table_mappings()
+        self._active_import_keys.clear()
         self._update_dataset_action_states()
 
         if self._start_next_pending_import_batch():
@@ -618,6 +624,39 @@ class DatasetOpsMixin:
             submit = getattr(self, "_isar_submit", None)
             if callable(submit):
                 submit(pending_isar)
+
+    def _prompt_pending_table_mappings(self) -> None:
+        """Offer mappings on the GUI thread after the reader thread has stopped."""
+        pending = getattr(self, "_pending_table_mappings", [])
+        if not pending:
+            return
+        self._pending_table_mappings = []
+        self._table_mapping_active = True
+        self._update_dataset_action_states()
+        try:
+            for entry in pending:
+                path = str(entry["path"])
+                filename = os.path.basename(path)
+                dialog = None
+                try:
+                    from GRIM_Backend.ui.table_import import create_table_import_dialog
+                    dialog = create_table_import_dialog(self, path)
+                    if dialog.exec() != QDialog.Accepted:
+                        self._import_cycle_results.append((f"Skipped {filename} (column labeling cancelled).", False))
+                        continue
+                    dataset = dialog.dataset
+                    if not isinstance(dataset, RcsGrid):
+                        raise ValueError("Column mapping returned no dataset.")
+                    self._add_dataset_row(dataset, os.path.splitext(filename)[0], dataset.history,
+                                          file_name="", dirty=True)
+                    self._import_cycle_results.append((f"Imported {filename} with labeled columns; ready to save.", False))
+                except Exception as exc:
+                    self._import_cycle_results.append((f"Failed {filename}: {exc}", True))
+                finally:
+                    if dialog is not None:
+                        dialog.deleteLater()
+        finally:
+            self._table_mapping_active = False
 
     def _start_next_pending_import_batch(self) -> bool:
         """Drain one queued import when both dataset and ISAR workers are idle."""
@@ -653,6 +692,8 @@ class DatasetOpsMixin:
     def _on_load_worker_finished(self, summary: dict[str, object]) -> None:
         self._ensure_background_worker_state()
         loaded_entries_raw = summary.get("loaded", [])
+        mapping_entries = [entry for entry in summary.get("mapping_required", []) if isinstance(entry, dict)]
+        self._pending_table_mappings.extend(mapping_entries)
         failed_entries_raw = summary.get("failed", [])
         ignored = int(summary.get("ignored", 0) or 0)
         used_parallel = bool(summary.get("used_parallel", False))
@@ -704,7 +745,10 @@ class DatasetOpsMixin:
             msg += f" Ignored {ignored} unsupported file(s)."
         if used_parallel and total_supported > 1:
             msg += " Loaded in parallel."
-        self._import_cycle_results.append((msg, bool(failed)))
+        if loaded or failed or ignored or not mapping_entries:
+            self._import_cycle_results.append((msg, bool(failed)))
+        if mapping_entries:
+            msg = f"{len(mapping_entries)} file(s) need column labels. Opening the import editor…"
         self._last_import_summary = msg
         if failed:
             tooltip_failures = _compact_item_summary(failed, limit=20)
@@ -744,6 +788,8 @@ class DatasetOpsMixin:
         self._pending_join_names = None
         input_refs = self._pending_join_references
         self._pending_join_references = None
+        tolerance = self._pending_join_tolerance
+        self._pending_join_tolerance = 1.0e-6
 
         ok = bool(payload.get("ok", False))
         if not ok:
@@ -758,7 +804,10 @@ class DatasetOpsMixin:
         if not names:
             names = ["Dataset"]
         new_name = " | ".join(names)
-        history = f"Join (equal/complementary overlaps merged; conflicts rejected): {new_name}"
+        history = (
+            f"Join (tol={tolerance:g}; equal/complementary overlaps merged; "
+            f"conflicts rejected): {new_name}"
+        )
         output_name = f"Join[{new_name}]"
         output_id = self._add_dataset_row(merged, output_name, history, file_name="")
         recorder = getattr(self, "python_recorder", None)
@@ -767,7 +816,7 @@ class DatasetOpsMixin:
                 self._python_output_reference(output_id, output_name),
                 "join_datasets",
                 input_refs,
-                kwargs={"tol": 1.0e-6},
+                kwargs={"tol": tolerance},
                 comment="Join datasets on their union axes; reject conflicting overlaps",
             )
         self.status.showMessage(
@@ -1196,7 +1245,7 @@ class DatasetOpsMixin:
                 "btn_round", "btn_offset", "btn_medianize", "btn_duplicate",
                 "btn_audit", "btn_provenance", "btn_set_coordinates",
                 "btn_axis_units", "btn_el_to_az360", "btn_swap_el_az",
-                "btn_sentri_elevation", "btn_to_dbke", "btn_to_dbsm",
+                "btn_sentri_elevation", "btn_extrusion",
                 "btn_conic_gc", "btn_wedge_to_conic",
             ),
             selected_count >= 1,
@@ -1204,7 +1253,7 @@ class DatasetOpsMixin:
         enable(
             (
                 "btn_coherent_add", "btn_coherent_sub", "btn_incoherent_add",
-                "btn_incoherent_sub", "btn_join", "btn_stitch", "btn_overlap",
+                "btn_incoherent_sub", "btn_join", "btn_overlap",
                 "btn_align", "btn_compatibility", "btn_support_reference",
             ),
             selected_count >= 2,
@@ -1250,6 +1299,8 @@ class DatasetOpsMixin:
             notify()
 
     def _populate_params(self, dataset: RcsGrid) -> None:
+        from GRIM_Backend.ui.isar_controls import sync_frequency_controls
+        sync_frequency_controls((getattr(self, "_plot_contexts", {}) or {}).get("isar"), dataset)
         self._update_parameter_headers(dataset)
         self._fill_list(self.list_pol, dataset.polarizations)
         self._fill_list(self.list_freq, dataset.frequencies)
@@ -2131,29 +2182,7 @@ class DatasetOpsMixin:
             self.status.showMessage("Select at least 2 datasets to join.")
             return
 
-        names = [name for name, _ in datasets]
-        grids = [grid for _, grid in datasets]
-        worker = _JoinDatasetsWorker(grids, tol=1e-6)
-        worker.progress.connect(self._on_join_worker_progress)
-        worker.finished.connect(self._on_join_worker_finished)
-        if not self._try_start_background_job("Dataset join", worker):
-            return
-        self._pending_join_names = names
-        self._pending_join_references = self._python_input_references(datasets)
-        self.status.showMessage(f"Join... 0/{len(grids)}")
-
-    def _stitch_selected_datasets(self) -> None:
-        datasets = self._selected_datasets_ordered(
-            use_selection_order=True,
-            empty_message="Select two or more datasets with overlaps to merge.",
-        )
-        if datasets is None:
-            return
-        if len(datasets) < 2:
-            self.status.showMessage("Select at least 2 datasets to merge.")
-            return
-
-        dialog = StitchDialog([name for name, _dataset in datasets], parent=self)
+        dialog = JoinDialog([name for name, _dataset in datasets], parent=self)
         if dialog.exec() != QDialog.Accepted:
             dialog.deleteLater()
             return
@@ -2161,6 +2190,19 @@ class DatasetOpsMixin:
         dialog.deleteLater()
         policy = str(params["policy"])
         tolerance = float(params["tol"])
+        if policy == "error":
+            names = [name for name, _dataset in datasets]
+            grids = [dataset for _name, dataset in datasets]
+            worker = _JoinDatasetsWorker(grids, tol=tolerance)
+            worker.progress.connect(self._on_join_worker_progress)
+            worker.finished.connect(self._on_join_worker_finished)
+            if not self._try_start_background_job("Dataset join", worker):
+                return
+            self._pending_join_names = names
+            self._pending_join_references = self._python_input_references(datasets)
+            self._pending_join_tolerance = tolerance
+            self.status.showMessage(f"Join... 0/{len(grids)}")
+            return
         metadata_attested = False
         if policy == "coherent-mean":
             attestation = self._confirm_coherent_metadata(
@@ -2211,6 +2253,7 @@ class DatasetOpsMixin:
                     kwargs={
                         "policy": policy,
                         "tol": tolerance,
+                        "metadata_attested": metadata_attested,
                     },
                     comment=f"Merge {len(datasets)} overlapping datasets using {policy}",
                 )
@@ -2561,7 +2604,7 @@ class DatasetOpsMixin:
             )
 
     def _percentile_selected(self) -> None:
-        """Replace every azimuth sample with its azimuth-percentile value."""
+        """Standalone azimuth-percentile preset with compact statistics output."""
 
         datasets = self._selected_datasets_ordered(
             use_selection_order=True,
@@ -2585,7 +2628,7 @@ class DatasetOpsMixin:
             statistic="percentile",
             percentile=float(percentile),
             axes=("azimuth",),
-            broadcast_reduced=True,
+            broadcast_reduced=False,
             operation_title="Percentile",
             output_qualifier=" az",
         )
@@ -4430,22 +4473,30 @@ class DatasetOpsMixin:
             start_message=f"Applying offset to {len(datasets)} dataset(s)...",
         )
 
-    def _convert_to_dbke_selected(self) -> None:
+    def _convert_extrusion_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
             use_selection_order=True,
-            empty_message="Select one or more datasets to convert to dBke.",
+            empty_message="Select one or more datasets for an extrusion estimate.",
         )
         if datasets is None:
             return
 
-        dlg = ExtrusionLengthDialog(parent=self)
+        default_destination = (
+            "dbsm" if datasets[0][1].linear_quantity() == "sigma_2d" else "dbke"
+        )
+        dlg = ExtrusionConversionDialog(parent=self, destination=default_destination)
         if dlg.exec() != QDialog.Accepted:
+            dlg.deleteLater()
             return
+        destination = dlg.destination()
         length_m = dlg.length_m()
         length_label = dlg.display_text()
+        dlg.deleteLater()
         if length_m <= 0.0 or not np.isfinite(length_m):
-            self.status.showMessage("Convert to dBke: length must be positive.")
+            self.status.showMessage("Extrusion estimate: length must be positive.")
             return
+        label = "dBke" if destination == "dbke" else "dBsm"
+        source_label = "dBsm" if destination == "dbke" else "dBke"
         source_references = [
             self._python_reference_for_dataset(dataset)
             for _name, dataset in datasets
@@ -4453,17 +4504,17 @@ class DatasetOpsMixin:
 
         def operation(_index, _name, dataset):
             return convert_extrusion(
-                dataset, to="dbke", length_m=float(length_m)
+                dataset, to=destination, length_m=float(length_m)
             )
 
         def publish(results, skipped) -> None:
             recorder = getattr(self, "python_recorder", None)
             for source_index, name, result in results:
                 history = (
-                    f"Convert to dBke (extruded L={length_label}, "
-                    f"{length_m:.6g} m): {name}"
+                    f"Extrusion estimate {source_label} → {label} "
+                    f"(broadside uniform body, L={length_label}, {length_m:.6g} m): {name}"
                 )
-                output_name = f"{name} [→ dBke L={length_label}]"
+                output_name = f"{name} [→ {label} L={length_label}]"
                 output_id = self._add_dataset_row(
                     result, output_name, history, file_name=""
                 )
@@ -4473,100 +4524,26 @@ class DatasetOpsMixin:
                         self._python_output_reference(output_id, output_name),
                         "convert_extrusion",
                         [source_ref],
-                        kwargs={"to": "dbke", "length_m": float(length_m)},
-                        comment=f"Convert {name} from dBsm to dBke",
+                        kwargs={"to": destination, "length_m": float(length_m)},
+                        comment=f"Extrusion estimate for {name}: {source_label} to {label}",
                     )
-            conversion_offset_db = 10.0 * np.log10(
-                np.pi / (length_m * length_m)
-            )
+            conversion_offset_db = 10.0 * np.log10(np.pi / (length_m * length_m))
+            if destination == "dbsm":
+                conversion_offset_db = -conversion_offset_db
             message = (
-                f"Convert to dBke created {len(results)} dataset(s) "
-                f"(L={length_label} → constant offset "
-                f"{conversion_offset_db:+.2f} dB)."
+                f"Extrusion estimate to {label} created {len(results)} dataset(s) "
+                f"(L={length_label} → constant offset {conversion_offset_db:+.2f} dB)."
             )
             if skipped:
                 message += f" Skipped: {_compact_item_summary(skipped)}"
             self.status.showMessage(message)
 
         self._start_dataset_map_job(
-            "dBsm-to-dBke conversion",
+            "Extrusion estimate",
             datasets,
             operation,
             publish,
-            start_message=f"Converting {len(datasets)} dataset(s) to dBke...",
-        )
-
-    def _convert_to_dbsm_selected(self) -> None:
-        datasets = self._selected_datasets_ordered(
-            use_selection_order=True,
-            empty_message="Select one or more datasets to convert to dBsm.",
-        )
-        if datasets is None:
-            return
-
-        dlg = ExtrusionLengthDialog(
-            parent=self,
-            title="Convert dBke → dBsm",
-            formula=(
-                "σ_3D = σ_2D · (2 L² / λ) → dBsm = dBke + 20·log₁₀(L) − "
-                "10·log₁₀(π) (frequency-independent offset)."
-            ),
-        )
-        if dlg.exec() != QDialog.Accepted:
-            return
-        length_m = dlg.length_m()
-        length_label = dlg.display_text()
-        if length_m <= 0.0 or not np.isfinite(length_m):
-            self.status.showMessage("Convert to dBsm: length must be positive.")
-            return
-        source_references = [
-            self._python_reference_for_dataset(dataset)
-            for _name, dataset in datasets
-        ]
-
-        def operation(_index, _name, dataset):
-            return convert_extrusion(
-                dataset, to="dbsm", length_m=float(length_m)
-            )
-
-        def publish(results, skipped) -> None:
-            recorder = getattr(self, "python_recorder", None)
-            for source_index, name, result in results:
-                history = (
-                    f"Convert to dBsm (extruded L={length_label}, "
-                    f"{length_m:.6g} m): {name}"
-                )
-                output_name = f"{name} [→ dBsm L={length_label}]"
-                output_id = self._add_dataset_row(
-                    result, output_name, history, file_name=""
-                )
-                source_ref = source_references[source_index]
-                if recorder is not None and source_ref is not None:
-                    recorder.record_function(
-                        self._python_output_reference(output_id, output_name),
-                        "convert_extrusion",
-                        [source_ref],
-                        kwargs={"to": "dbsm", "length_m": float(length_m)},
-                        comment=f"Convert {name} from dBke to dBsm",
-                    )
-            conversion_offset_db = (
-                20.0 * np.log10(length_m) - 10.0 * np.log10(np.pi)
-            )
-            message = (
-                f"Convert to dBsm created {len(results)} dataset(s) "
-                f"(L={length_label} → constant offset "
-                f"{conversion_offset_db:+.2f} dB)."
-            )
-            if skipped:
-                message += f" Skipped: {_compact_item_summary(skipped)}"
-            self.status.showMessage(message)
-
-        self._start_dataset_map_job(
-            "dBke-to-dBsm conversion",
-            datasets,
-            operation,
-            publish,
-            start_message=f"Converting {len(datasets)} dataset(s) to dBsm...",
+            start_message=f"Estimating {len(datasets)} dataset(s) as {label}...",
         )
 
     def _set_coordinates_selected(self) -> None:

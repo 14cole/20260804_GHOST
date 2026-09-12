@@ -4,19 +4,26 @@ from __future__ import annotations
 import numpy as np
 from . import common
 from . import isar_mode as computation
+from GRIM_Backend.isar.geometry import angular_bands, angular_sublooks, image_extent
 
 
-def render(self) -> None:
+def render(self, *, plan_only=False) -> None:
     """GUI-thread half: validate the selections, capture everything the worker
     needs into a params dict, and hand off to the mixin's async submit. The
     finished computation comes back through `display_results`."""
-    self.last_plot_mode = "isar_image"
-    self._start_plot_render()
+    if not plan_only:
+        self.last_plot_mode = "isar_image"
+        self._start_plot_render()
     if self.active_dataset is None:
         self.status.showMessage("Select a dataset before plotting.")
         return
     if self._preflight_plot_datasets([("Dataset", self.active_dataset)]) is None:
         return
+    advanced = getattr(self, "isar_advanced", None)
+    options = advanced.options() if advanced is not None else {}
+    image_mode = options.get("aperture_mode", "auto")
+    composite_side = int(options.get("composite_side", computation._COMPOSITE_GRID_SIDE))
+    use_composite = lambda span: image_mode == "composite" or (image_mode == "auto" and span > computation._COMPOSITE_SPAN_DEG)
 
     flip_x_widget = getattr(self, "chk_isar_flip_x", None)
     flip_x = bool(flip_x_widget.isChecked()) if flip_x_widget is not None else False
@@ -146,11 +153,15 @@ def render(self) -> None:
         # and circular aperture mode must keep a 0°/360° crossing coherent.
         bands: list[list[int]] = [az_indices] if len(az_indices) >= 2 else []
     else:
-        bands = computation._split_into_bands(az_indices)
-        bands = [b for b in bands if len(b) >= 2]
-    if not bands:
+        try:
+            bands = angular_bands(az_indices, computation._angle_values_to_degrees(
+                self.active_dataset, "azimuth", self.active_dataset.azimuths))
+        except ValueError as exc:
+            self.status.showMessage(f"ISAR selection: {exc}")
+            return
+    if not bands or any(len(b) < 2 for b in bands):
         self.status.showMessage(
-            "Each azimuth/aspect band needs at least 2 contiguous samples for ISAR imaging."
+            "Each angular sector needs at least 2 samples for ISAR imaging; an isolated sample cannot form an image."
         )
         return
     if len(bands) > common.MAX_WATERFALL_PANELS:
@@ -173,8 +184,10 @@ def render(self) -> None:
             "azimuth",
             np.asarray(self.active_dataset.azimuths, dtype=float)[band],
         )
-        if float(np.max(band_degrees) - np.min(band_degrees)) > computation._COMPOSITE_SPAN_DEG:
-            total_display_cells += 1024 * 1024
+        if az_center_deg is not None:
+            band_degrees = computation._unwrap_degrees(band_degrees, az_center_deg)
+        if use_composite(float(np.ptp(band_degrees))):
+            total_display_cells += composite_side * composite_side
             continue
         az_count = az_target_deg.size if az_target_deg is not None else len(band)
         n_az_fft_estimate = computation._next_fast_len(max(int(az_count), 256))
@@ -214,7 +227,9 @@ def render(self) -> None:
     recon_combo = getattr(self, "combo_isar_recon", None)
     recon_text = recon_combo.currentText() if recon_combo is not None else "FFT"
     recon_lower = recon_text.lower()
-    if recon_lower.startswith("sparse"):
+    if recon_lower.startswith("recommended"):
+        recon = "auto"
+    elif recon_lower.startswith("sparse"):
         recon = "sparse"
     elif "accurate" in recon_lower or "cartesian" in recon_lower:
         recon = "accurate"
@@ -238,24 +253,26 @@ def render(self) -> None:
         if az_center_deg is not None:
             band_degrees = computation._unwrap_degrees(band_degrees, az_center_deg)
         band_span = float(np.max(band_degrees) - np.min(band_degrees))
-        if band_span > computation._COMPOSITE_SPAN_DEG:
-            look_count = max(2, int(np.ceil(band_span / computation._COMPOSITE_SUB_DEG)))
-            sublook_count = max(2, int(np.ceil(len(band) / look_count)))
+        if use_composite(band_span):
+            try:
+                looks = angular_sublooks(range(len(band)), band_degrees, maximum_span=computation._COMPOSITE_SUB_DEG)
+            except ValueError as exc:
+                self.status.showMessage(f"ISAR composite: {exc}")
+                return
+            sublook_count = max(map(len, looks))
             working = computation._estimate_band_working_set_bytes(
                 sublook_count,
                 len(freq_indices_sorted),
-                reconstruction=recon,
+                reconstruction="accurate" if recon == "auto" else recon,
                 retain_complex=False,
-            ) + computation._COMPOSITE_SCRATCH_BYTES + (
-                computation._COMPOSITE_GRID_SIDE**2 * np.dtype(np.float32).itemsize
-            )
-            retained = computation._COMPOSITE_GRID_SIDE**2 * np.dtype(np.float32).itemsize
+            ) + 68 * composite_side**2
+            retained = composite_side**2 * np.dtype(np.float32).itemsize
         else:
             az_count = int(az_target_deg.size) if az_target_deg is not None else len(band)
             working = computation._estimate_band_working_set_bytes(
                 az_count,
                 len(freq_indices_sorted),
-                reconstruction=recon,
+                reconstruction="accurate" if recon == "auto" else recon,
                 retain_complex=True,
             )
             n_az_fft = computation._next_fast_len(max(az_count, 256))
@@ -274,7 +291,8 @@ def render(self) -> None:
         self.status.showMessage(f"ISAR blocked: {exc}.")
         return
 
-    self._isar_submit({
+    params = {
+        **options,
         "dataset": self.active_dataset,
         # Identity token: if the active figure changed while computing (user
         # switched tabs), the finished result is dropped instead of being
@@ -303,7 +321,27 @@ def render(self) -> None:
         # physically meaningful complex image exists.
         "retain_complex": True,
         "isar_contract_assumptions": contract_assumptions,
-    })
+    }
+    try:
+        plans = []
+        for band in bands:
+            az = computation._angle_values_to_degrees(self.active_dataset, "azimuth", self.active_dataset.azimuths[band])
+            if az_center_deg is not None:
+                az = computation._unwrap_degrees(az, az_center_deg)
+            plans.append(computation.plan_isar(az, freq_hz, elevation_degrees=elevation_deg,
+                scene_half_extent_m=options.get("scene_half_extent_m"), reconstruction=recon, mode=image_mode))
+    except ValueError as exc:
+        self.status.showMessage(f"ISAR planning: {exc}")
+        return
+    tools = getattr(self, "isar_tools", None)
+    if tools is not None:
+        from GRIM_Backend.ui.isar_controls import quality_text
+        tools.show_quality(quality_text([{"accuracy_plan": p, "resolved_reconstruction": p["selected_reconstruction"]} for p in plans], unit_name)
+            + f"\nEstimated additional formation peak: {estimated_peak / 1024**2:.1f} MiB. Acquired samples are evaluated before interpolation.")
+    if plan_only:
+        self.status.showMessage("ISAR plan updated. No image was formed.")
+        return
+    self._isar_submit(params)
 
 def display_results(self, params: dict, band_results: list, elapsed: float) -> None:
     """GUI-thread half two: draw the computed band images. Runs from the
@@ -311,6 +349,10 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
     dataset = params["dataset"]
     unit_name = params["unit_name"]
     az_target_deg = params["az_target_deg"]
+    tools = getattr(self, "isar_tools", None)
+    if tools is not None:
+        from GRIM_Backend.ui.isar_controls import quality_text
+        tools.show_quality(quality_text(band_results, unit_name))
 
     # Convert coherent magnitude to generic image intensity. Image formation
     # does not guarantee an absolute square-metre normalization, so neither
@@ -332,6 +374,8 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
 
     self._remove_colorbar()
     self.plot_figure.clear()
+    self.plot_figure.set_layout_engine('constrained')
+    self.plot_figure._grim_isar_layout = True
     if n_bands == 1:
         self.plot_ax = self.plot_figure.add_subplot(111)
         self.plot_axes = None
@@ -372,15 +416,12 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
     overall_y_min = float("inf")
     overall_y_max = float("-inf")
     for ax, br in zip(active_axes, band_results):
-        x_min = float(br["x_range"].min())
-        x_max = float(br["x_range"].max())
-        y_min = float(br["y_range"].min())
-        y_max = float(br["y_range"].max())
+        x_min, x_max, y_min, y_max = image_extent(br)
         # imshow on a uniform grid is several times faster than pcolormesh
         # for big arrays (1601-frequency datasets feel laggy with pcolormesh).
         mesh = ax.imshow(
             br["isar_display"].T,
-            extent=[x_min, x_max, y_min, y_max],
+            extent=image_extent(br),
             origin="lower",
             aspect="auto",
             interpolation="nearest",
@@ -409,9 +450,12 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
     elev_value = float(params["elevation_deg"])
     elev_name = common.angular_axis_name(dataset, "elevation")
     pol_value = dataset.polarizations[params["pol_idx"]]
-    if params.get("recon") == "sparse":
+    resolved = {br.get('resolved_reconstruction', params.get('recon')) for br in band_results}
+    if len(resolved) > 1:
+        recon_label = " | PFA method selected per aperture"
+    elif 'sparse' in resolved:
         recon_label = " | Sparse L1 (Experimental)"
-    elif params.get("recon") == "accurate":
+    elif 'accurate' in resolved:
         recon_label = " | Cartesian PFA"
     else:
         recon_label = " | Fast PFA"
@@ -526,9 +570,11 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
     # spacings ((max-min)/median); anything > ~0.001 was actually resampled.
     az_max = max(br.get("az_nonuniformity", 0.0) for br in band_results)
     fr_max = max(br.get("freq_nonuniformity", 0.0) for br in band_results)
-    if params.get("recon") == "sparse":
+    if len(resolved) > 1:
+        mode_label = 'PFA method selected per aperture'
+    elif 'sparse' in resolved:
         mode_label = "Sparse L1 (Experimental)"
-    elif params.get("recon") == "accurate":
+    elif 'accurate' in resolved:
         mode_label = "Cartesian PFA"
     else:
         mode_label = "Fast PFA"
@@ -544,7 +590,7 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
         )
     if composite_subs:
         notes.append(
-            f"wide aperture — composited {composite_subs} × ~{computation._COMPOSITE_SUB_DEG:g}° looks "
+            f"composited {composite_subs} looks, each ≤{computation._COMPOSITE_SUB_DEG:g}° "
             "into the 0°-azimuth body frame"
         )
     if composite_subs and az_target_deg is not None:

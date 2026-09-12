@@ -10,6 +10,10 @@ build/
 dist/
 wheelhouse/
 
+# Local audits, experiments, and generated solver exports are not project sources.
+/experiments/
+*_rcs_????????_??????.grim
+
 # Solver run products and restart state
 rcs_runs/
 rcs_runs_bor/

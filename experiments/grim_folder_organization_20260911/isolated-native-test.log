@@ -1,6 +1,0 @@
-test_lossy_coated_pec_sphere_matches_mie (test_bor_physics_regression.AnalyticSphereRegressionTests.test_lossy_coated_pec_sphere_matches_mie) ... ok
-
-----------------------------------------------------------------------
-Ran 1 test in 161.274s
-
-OK

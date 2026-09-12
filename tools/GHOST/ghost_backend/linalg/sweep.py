@@ -22,11 +22,13 @@ def mode():
     return value
 
 
-def _qr_basis(value, threshold):
+def _qr_basis(value, threshold, max_rank=None):
     """Form only selected Q columns, avoiding a full D-by-batch Q."""
     (raw, tau), r, piv = la.qr(value, mode='raw', pivoting=True, check_finite=False)
     tail = np.sqrt(np.cumsum(np.sum(abs(r)**2, axis=1)[::-1])[::-1])
     rank = int(np.count_nonzero(tail > threshold))
+    if max_rank is not None and rank > max_rank:
+        return None, None
     if not rank:
         return np.empty((len(value), 0), complex), np.empty((0, value.shape[1]), complex)
     packed = np.array(raw[:, :rank], order='F', copy=True)
@@ -52,6 +54,43 @@ class SweepBasis:
             self.owner = weakref.ref(factor)
             self.scale = self.q = self.x = None
 
+    def reset(self, rhs):
+        """Retain a bounded basis for the current angular neighborhood."""
+        self.scale = np.max(abs(rhs), axis=1)
+        self.scale[self.scale == 0] = 1.
+        self.q = np.empty((len(rhs), 0), complex)
+        self.x = np.empty((len(rhs), 0), complex)
+
+
+def _sweep_qr(value, threshold, rank_limit, evidence, checkpoint):
+    """Propose from sampled illuminations, accepting only a full-batch check."""
+    if rank_limit <= 0:
+        return None, None
+    # Stop paying for proposals when they have mostly failed for this factor.
+    # Full QR remains available for every batch, including after basis refresh.
+    attempts = evidence.get('sampled_basis_attempts', 0)
+    accepts = evidence.get('sampled_basis_accepts', 0)
+    if value.shape[1] >= 256 and attempts <= 2*accepts:
+        evidence['sampled_basis_attempts'] = attempts + 1
+        ids = np.linspace(0, value.shape[1]-1, 64).astype(int)
+        # A small subset has less energy than the complete batch. Use a tighter
+        # proposal threshold so weak modes are not dropped before full checking.
+        candidate, _ = _qr_basis(value[:, ids],
+            .25*threshold*np.sqrt(len(ids)/float(value.shape[1])), max_rank=rank_limit)
+        checkpoint()
+        if candidate is not None and candidate.shape[1] < len(ids):
+            recovery = candidate.conj().T @ value
+            # The sampling proposes a span, never an angular interpolation.
+            # Every requested illumination must satisfy the same QR threshold.
+            difference = value - candidate @ recovery
+            if _frobenius_norm(difference) <= threshold:
+                evidence['sampled_basis_accepts'] = accepts + 1
+                return candidate, recovery
+        candidate = recovery = difference = None
+    # Avoid forming Q when its rank cannot satisfy the existing savings/capacity
+    # requirements. The full pivoted QR still determines that rank.
+    return _qr_basis(value, threshold, max_rank=rank_limit)
+
 
 def _evidence(factor, setting):
     return factor.event.setdefault('sweep_compression', dict(requested=setting,
@@ -62,8 +101,10 @@ def _evidence(factor, setting):
 
 
 @timed_stage('rhs_compression')
-def solve(factor, rhs, basis_state=None):
-    setting = mode()
+def solve(factor, rhs, basis_state=None, setting=None):
+    setting = mode() if setting is None else setting
+    if setting not in ('off', 'auto', 'on'):
+        raise ValueError('RHS compression must be off, auto, or on.')
     rhs = np.asarray(rhs, complex)
     if rhs.ndim != 2 or rhs.shape[0] != len(factor.a) or not rhs.shape[1]:
         raise ValueError('Sweep RHS must have one or more columns and match the system.')
@@ -79,10 +120,7 @@ def solve(factor, rhs, basis_state=None):
     state = basis_state if basis_state is not None else SweepBasis(count)
     state.bind(factor)
     if state.scale is None:
-        state.scale = np.max(abs(rhs), axis=1)
-        state.scale[state.scale == 0] = 1.
-        state.q = np.empty((n, 0), complex)
-        state.x = np.empty((n, 0), complex)
+        state.reset(rhs)
     with np.errstate(over='ignore', invalid='ignore'):
         scaled = rhs / state.scale[:, None]
         norm = max(_frobenius_norm(scaled), 1e-300)
@@ -105,7 +143,23 @@ def solve(factor, rhs, basis_state=None):
         if existing and _frobenius_norm(remainder) <= 2e-15*norm:
             q, extension = np.empty((n, 0), complex), np.empty((0, count), complex)
         else:
-            q, extension = _qr_basis(remainder, 2e-15*norm)
+            rank_limit = min(state.capacity-existing, int(np.ceil(.7*count))-1)
+            q, extension = _sweep_qr(remainder, 2e-15*norm, rank_limit, evidence, factor.checkpoint)
+            if q is None and existing and count >= 32:
+                # A broad sweep can exhaust a useful local span. Release it
+                # before building a fresh span for the current batch, while
+                # keeping the same factorization, capacity and error limits.
+                evidence['basis_restarts'] = evidence.get('basis_restarts', 0) + 1
+                scaled = remainder = correction = recovery = None
+                state.reset(rhs)
+                evidence['retained_basis_columns'] = 0
+                scaled = rhs / state.scale[:, None]
+                norm = max(_frobenius_norm(scaled), 1e-300)
+                existing = 0
+                recovery = np.empty((0, count), complex)
+                remainder = scaled.copy()
+                q, extension = _sweep_qr(remainder, 2e-15*norm,
+                    min(state.capacity, int(np.ceil(.7*count))-1), evidence, factor.checkpoint)
     except (la.LinAlgError, ValueError):
         q = None
     if q is None or q.shape[1] + existing > state.capacity or q.shape[1] >= .7*count:

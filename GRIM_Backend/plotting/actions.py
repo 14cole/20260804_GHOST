@@ -22,6 +22,7 @@ from GRIM_Backend.plotting.modes import (
     azimuth_polar_mode,
     azimuth_rect_mode,
     compare_mode,
+    delta_map_mode,
     elevation_sweep_mode,
     frequency_mode,
     isar_mode,
@@ -36,6 +37,7 @@ class _IsarComputeSignals(QObject):
     signals auto-queue), so all Qt/matplotlib work stays on the GUI thread."""
 
     done = Signal(object, object)  # (params, result)
+    progress = Signal(object, str)
 
 
 _AXIS_AVAILABILITY_WORK_BYTES = 8 * 1024**2
@@ -194,6 +196,8 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
             self._plot_az_vs_range()
         elif self.last_plot_mode == "compare":
             self._plot_compare()
+        elif self.last_plot_mode == "delta_map":
+            self._plot_delta_map()
 
     def _maybe_autoscale(self) -> None:
         """Auto-fit the view after a render when the Auto Scale toggle is on.
@@ -224,6 +228,9 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
             self._plot_isar_image()
 
     def _on_waterfall_style_changed(self) -> None:
+        if self.last_plot_mode == "delta_map":
+            self._plot_delta_map()
+            return
         if self.last_plot_mode not in ("waterfall", "isar_image", "az_vs_range"):
             return
         if self.last_plot_mode == "waterfall":
@@ -234,6 +241,9 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
             self._plot_isar_image()
 
     def _on_colormap_changed(self) -> None:
+        if self.last_plot_mode == "delta_map":
+            # Signed delta maps keep a fixed, zero-centered diverging palette.
+            return
         # A colormap switch is a style-only change. Reuse the ScalarMappables
         # already on the canvas instead of repeating FFTs, gridding, or large
         # dataset selections. Fall back to a render only when no live mapped
@@ -606,7 +616,7 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
 
     def _ensure_axes(self, projection: str) -> None:
         desired = "polar" if projection == "polar" else "rectilinear"
-        if self.plot_ax.name == desired and self.plot_axes is None:
+        if self.plot_ax.name == desired and self.plot_axes is None and not hasattr(self.plot_ax, "_grim_delta_map"):
             return
         self._remove_colorbar()
         self.plot_figure.clear()
@@ -619,6 +629,9 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
 
     def _clear_plot(self) -> None:
         self._set_compare_sector_controls_visible(False)
+        controls = getattr(self, "delta_map_controls", None)
+        if controls is not None:
+            controls.hide()
         self._plot_render_generation = (
             int(getattr(self, "_plot_render_generation", 0)) + 1
         )
@@ -725,6 +738,15 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
     # --- renderer preflight, unit conversion, and display bounding ----------
 
     def _start_plot_render(self) -> None:
+        controls = getattr(self, "delta_map_controls", None)
+        if controls is not None and self.last_plot_mode != "delta_map":
+            controls.hide()
+        if self.last_plot_mode != "delta_map" and getattr(self.plot_figure, "_grim_delta_layout", False):
+            self.plot_figure.set_layout_engine(None)
+            self.plot_figure._grim_delta_layout = False
+        if self.last_plot_mode != 'isar_image' and getattr(self.plot_figure, '_grim_isar_layout', False):
+            self.plot_figure.set_layout_engine(None)
+            self.plot_figure._grim_isar_layout = False
         self._plot_render_notes = []
         self._plot_render_generation = (
             int(getattr(self, "_plot_render_generation", 0)) + 1
@@ -1172,6 +1194,12 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
         if button is not MouseButton.LEFT:
             return
         if not self._button_checked(getattr(self, "btn_zoom_box", None)):
+            ax = getattr(event, "inaxes", None)
+            delta = getattr(ax, "_grim_delta_map", None)
+            if delta is not None:
+                ax._grim_delta_pinned = delta_map_mode.cell_text(delta, event.xdata, event.ydata)
+                self.hover_readout.setText(ax._grim_delta_pinned or "Outside Delta Map cells")
+                return
             if getattr(self, "_active_plot_tab", "plotting") == "plotting":
                 line = self._dataset_line_at_event(event)
                 self._highlight_plot_dataset(
@@ -1430,6 +1458,7 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
         ) + 1
         self._invalidate_isar_figure()
         self._last_isar_artifact = None
+        self._last_isar_recipe = None
         self._last_isar_completed_input_revision = None
         export_result = self._isar_result_export_button()
         if export_result is not None:
@@ -1509,6 +1538,11 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
         if signals is None:
             signals = self._isar_signals = _IsarComputeSignals()
             signals.done.connect(self._on_isar_compute_done)
+            signals.progress.connect(self._on_isar_progress)
+        params["progress"] = lambda detail: signals.progress.emit(params, str(detail))
+        toolbar = self._isar_toolbar()
+        if toolbar is not None:
+            toolbar.cancel.setEnabled(True)
         self.status.showMessage("Computing ISAR image…")
 
         def work(params=params, signals=signals):
@@ -1538,6 +1572,9 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
 
     def _on_isar_compute_done(self, params: dict, result) -> None:
         self._isar_busy = False
+        toolbar = self._isar_toolbar()
+        if toolbar is not None:
+            toolbar.cancel.setEnabled(False)
         self._isar_cancel_event = None
         pending = getattr(self, "_isar_pending", None)
         self._isar_pending = None
@@ -1588,6 +1625,8 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
                 )
             else:
                 self._last_isar_artifact = (band_results, manifest)
+                from GRIM_Backend.isar.recipes import recipe_from_params
+                self._last_isar_recipe = recipe_from_params(params)
                 export_result = self._isar_result_export_button()
                 if export_result is not None:
                     export_result.setEnabled(True)
@@ -1694,6 +1733,12 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
         self.status.showMessage(f"ISAR color scale set to peak − {drop:g} dB.")
 
     def _on_phase_toggled(self) -> None:
+        if self.last_plot_mode == "delta_map" and self._button_checked(self.btn_phase):
+            self.btn_phase.blockSignals(True)
+            self.btn_phase.setChecked(False)
+            self.btn_phase.blockSignals(False)
+            self.status.showMessage("Delta Map shows level differences in dB. Use RF Compare for phase comparisons.")
+            return
         self._on_polarization_selection_changed()
         self._maybe_autoplot()
 
@@ -1758,9 +1803,14 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
         if self.plot_ax.name == "polar":
             return
 
-        self.plot_ax.set_autoscale_on(True)
-        self.plot_ax.relim()
-        self.plot_ax.autoscale_view(scalex=True, scaley=False)
+        delta = getattr(self.plot_ax, "_grim_delta_map", None)
+        if delta is not None:
+            edges = delta_map_mode.cell_edges(delta.x)
+            self.plot_ax.set_xlim(edges[0], edges[-1])
+        else:
+            self.plot_ax.set_autoscale_on(True)
+            self.plot_ax.relim()
+            self.plot_ax.autoscale_view(scalex=True, scaley=False)
         xmin, xmax = self.plot_ax.get_xlim()
         self.spin_plot_xmin.blockSignals(True)
         self.spin_plot_xmax.blockSignals(True)
@@ -1793,6 +1843,10 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
                 ax.set_ylim(ymin, ymax)
             self.plot_canvas.draw_idle()
             return
+        elif hasattr(self.plot_ax, "_grim_delta_map"):
+            edges = delta_map_mode.cell_edges(self.plot_ax._grim_delta_map.y)
+            ymin, ymax = edges[0], edges[-1]
+            self.plot_ax.set_ylim(ymin, ymax)
         else:
             self.plot_ax.set_autoscale_on(True)
             self.plot_ax.relim()
@@ -1995,7 +2049,7 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
         label = hover_readout or getattr(self, "hover_readout", None)
         if label is None:
             return
-        label.setText("x: --   y: --")
+        label.setText(getattr(getattr(self, "plot_ax", None), "_grim_delta_pinned", None) or "x: --   y: --")
 
     def _schedule_hover(self, event, hover_readout=None) -> None:
         self._pending_hover = (event, hover_readout)
@@ -2021,6 +2075,10 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
         ax = getattr(event, "inaxes", None)
         if ax is None:
             self._reset_hover_readout(label)
+            return
+        delta = getattr(ax, "_grim_delta_map", None)
+        if delta is not None:
+            label.setText(delta_map_mode.cell_text(delta, event.xdata, event.ydata) or "Outside Delta Map cells")
             return
         # z stays on the SAME line as x/y: a second line changes the label
         # height and visibly shifts the canvas whenever the cursor crosses
@@ -2117,6 +2175,10 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
         if getattr(self, "last_plot_mode", None) == "compare":
             self._plot_compare()
 
+    def _on_delta_map_controls_changed(self, *_args) -> None:
+        if getattr(self, "last_plot_mode", None) == "delta_map":
+            self._plot_delta_map()
+
     def _capture_successful_python_plot(self, mode: str) -> None:
         """Freeze the semantic spec without recording automatic re-plots."""
 
@@ -2141,6 +2203,8 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
         )
         if spec[3] == "isar_image":
             parameters.update(self._current_isar_python_display_style())
+        if spec[3] == "delta_map":
+            parameters["show_colorbar"] = bool(self.chk_colorbar.isChecked())
         self.last_python_plot_spec = (*spec[:4], parameters)
 
     def _current_isar_python_display_style(self) -> dict[str, object]:
@@ -2189,19 +2253,20 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
             "frequency",
             "elevation_sweep",
             "isar_image",
+            "delta_map",
         }
         if mode not in supported_modes:
             spec = (
                 "unsupported",
                 mode,
                 "the recorder supports rectangular/polar azimuth, frequency, "
-                "elevation-sweep, and ISAR plots only",
+                "elevation-sweep, Delta Map, and ISAR plots only",
             )
             self.last_python_plot_spec = spec
             if emit:
                 recorder.record_unsupported_plot(spec[1], spec[2])
             return
-        if self._button_checked(getattr(self, "btn_pbp", None)):
+        if mode != "delta_map" and self._button_checked(getattr(self, "btn_pbp", None)):
             spec = (
                 "unsupported",
                 mode,
@@ -2211,7 +2276,7 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
             if emit:
                 recorder.record_unsupported_plot(spec[1], spec[2])
             return
-        if self._button_checked(getattr(self, "btn_hold", None)):
+        if mode != "delta_map" and self._button_checked(getattr(self, "btn_hold", None)):
             spec = (
                 "unsupported",
                 mode,
@@ -2322,6 +2387,9 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
             "flip_x": bool(params["flip_x"]),
             "flip_y": bool(params["flip_y"]),
         }
+        for key in ("aperture_mode", "scene_half_extent_m", "composite_side", "native_diagnostics"):
+            if key in params:
+                options[key] = params[key]
         return {
             "azimuths": np.asarray(dataset.azimuths)[azimuth_indices].tolist(),
             "elevations": [
@@ -2401,6 +2469,14 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
         self._capture_successful_python_plot("compare")
         self._maybe_autoscale()
 
+    def _plot_delta_map(self) -> None:
+        if self._button_checked(self.btn_phase):
+            self.btn_phase.blockSignals(True)
+            self.btn_phase.setChecked(False)
+            self.btn_phase.blockSignals(False)
+            self._on_polarization_selection_changed()
+        delta_map_mode.render(self)
+
     def _ensure_compare_axes(self):
         """Return (top_ax, res_ax) for the 2-panel compare layout, recreating if needed."""
         if (
@@ -2421,3 +2497,54 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
         self.plot_axes = [top_ax]
         self.plot_figure.set_facecolor(self._current_plot_bg())
         return top_ax, res_ax
+
+    def _isar_toolbar(self):
+        context = (getattr(self, "_plot_contexts", {}) or {}).get("isar")
+        return getattr(context, "isar_tools", None) or getattr(self, "isar_tools", None)
+
+    def _on_isar_progress(self, params, detail):
+        if params.get("isar_input_revision") == getattr(self, "_isar_input_revision", 0):
+            self.status.showMessage("ISAR: " + detail)
+
+    def _cancel_isar(self):
+        self._isar_pending = None
+        play = getattr(self, "btn_isar_ap_play", None)
+        if play is not None:
+            play.setChecked(False)
+        self._invalidate_isar_result()
+        self.status.showMessage("ISAR cancellation requested; stopping at the next bounded processing block.")
+
+    def _plan_isar_image(self):
+        from GRIM_Backend.plotting.modes.isar_render import render
+        render(self, plan_only=True)
+
+    def _isar_control_changed(self, context, widget):
+        if not widget.isEnabled():
+            return
+        if widget in (context.spin_isar_freq_min, context.spin_isar_freq_max) and not context.chk_isar_freq_band.isChecked():
+            return
+        if widget in (context.spin_isar_az_min, context.spin_isar_az_max, context.spin_isar_az_step) and not context.chk_isar_az_interp.isChecked():
+            return
+        if widget in (context.spin_isar_ap_center, context.spin_isar_ap_width) and not context.chk_isar_aperture.isChecked():
+            return
+        self._invalidate_isar_result()
+
+    def _open_isar_result(self):
+        from GRIM_Backend.ui.isar_workflow import open_result
+        open_result(self)
+
+    def _compare_isar_result(self):
+        from GRIM_Backend.ui.isar_workflow import open_result
+        open_result(self, compare=True)
+
+    def _save_isar_recipe(self):
+        from GRIM_Backend.ui.isar_workflow import save_recipe
+        save_recipe(self)
+
+    def _load_isar_recipe(self):
+        from GRIM_Backend.ui.isar_workflow import load_recipe
+        load_recipe(self)
+
+    def _show_isar_workflow(self):
+        from GRIM_Backend.ui.isar_workflow import show_guide
+        show_guide(self)

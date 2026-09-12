@@ -1,4 +1,5 @@
 """Body-of-revolution geometry dispatch, solves, and result packaging."""
+from ghost_backend.bor.options import configured, current_options, compressed_requested
 
 import cmath
 import math
@@ -397,6 +398,7 @@ def _validate_bor_far_controls(kind: 'str', assembly: 'str',
         raise ValueError(f"Unsupported BoR assembly-control kind {kind!r}.")
 
 
+@configured
 def estimate_bor_resources(
     geometry_snapshot: 'Dict[str, Any]',
     frequency_ghz: 'float',
@@ -497,6 +499,21 @@ def estimate_bor_resources(
         (2 if is_conductor else 4) * (int(elements) + 1)
         for elements, is_conductor in surface_layout
     )
+    if compressed_requested():
+        auxiliary = _estimate_junction_auxiliary_gb(surface_layout, mode_cap)
+        dense_peak = estimate_bor_dense_peak_gb(unknowns, 2*aspects.size,
+                                              workers=worker_count, mode_tasks=mode_cap+1)
+        return dict(frequency_ghz=frequency, geometry_kind=kind, mesh_elements=int(element_count),
+            surface_count=len(surface_layout), n_unknowns_estimate=int(unknowns),
+            mode_cap_estimate=int(mode_cap), mode_tail_start_estimate=int(mode_tail_start),
+            active_mode_workers=min(worker_count, mode_cap+1), assembly_estimate='compressed',
+            table_precision_estimate='double', persistent_assembly_gb=auxiliary['retained_gb'],
+            held_assembly_gb=auxiliary['retained_gb'], junction_projection_gb=auxiliary['projection_gb'],
+            near_junction_operator_gb=auxiliary['near_gb'], stream_mode_block_estimate=None,
+            estimated_peak_gb=estimate_bor_total_peak_gb(auxiliary['peak_gb'], dense_peak),
+            mesh_certification=bool(mesh_certification),
+            memory_estimate_method='compressed_payload_cap_and_workspace',
+            angle_batch_size=current_options()['angle_batch_size'])
     persistent_gb = 0.0
     held_assembly_gb = 0.0
     stream_mode_block = None
@@ -1174,7 +1191,7 @@ def _estimate_junction_auxiliary_gb(surface_layout, mode_cap: 'int') -> 'Dict[st
     )
     category_count = 1 if modes == 0 else (3 if modes == 1 else 4)
     projection_bytes = (
-        category_count * unknowns * unknowns * complex_bytes
+        category_count * unknowns * (6 if compressed_requested() else unknowns) * complex_bytes
     )
 
     near_bytes = 0.0
@@ -1224,6 +1241,7 @@ def _enforce_total_element_limit(surface_layout, max_elements: 'int') -> 'int':
 
 
 @profiled_solve
+@configured
 def solve_monostatic_rcs_bor(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
@@ -1286,6 +1304,7 @@ def solve_monostatic_rcs_bor(
     if any((not math.isfinite(a)) or a < 0.0 or a > 180.0 for a in aspects):
         raise ValueError("Aspect angles must lie in [0, 180] degrees from +z.")
     assembly_key = str(assembly).strip().lower()
+    expected_assembly = "compressed" if compressed_requested() else assembly_key
     if assembly_key not in {"auto", "tables", "streaming"}:
         raise ValueError(
             "assembly must be 'auto', 'tables', or 'streaming'."
@@ -1411,12 +1430,12 @@ def solve_monostatic_rcs_bor(
                 out.get("table_precision", "")
             ).strip().lower()
             if (
-                assembly_key != "auto"
-                and actual_assembly != assembly_key
+                expected_assembly != "auto"
+                and actual_assembly != expected_assembly
             ):
                 raise RuntimeError(
                     "BoR conductor solver did not attest the requested "
-                    f"assembly={assembly_key!r}; reported "
+                    f"assembly={expected_assembly!r}; reported "
                     f"{actual_assembly or 'missing'!r}."
                 )
             if (
@@ -1447,12 +1466,12 @@ def solve_monostatic_rcs_bor(
                 out.get("table_precision", "")
             ).strip().lower()
             if (
-                assembly_key != "auto"
-                and actual_assembly != assembly_key
+                expected_assembly != "auto"
+                and actual_assembly != expected_assembly
             ):
                 raise RuntimeError(
                     "BoR dielectric solver did not attest the requested "
-                    f"assembly={assembly_key!r}; reported "
+                    f"assembly={expected_assembly!r}; reported "
                     f"{actual_assembly or 'missing'!r}."
                 )
             if (
@@ -1481,12 +1500,12 @@ def solve_monostatic_rcs_bor(
                 out.get("table_precision", "")
             ).strip().lower()
             if (
-                assembly_key != "auto"
-                and actual_assembly != assembly_key
+                expected_assembly != "auto"
+                and actual_assembly != expected_assembly
             ):
                 raise RuntimeError(
                     "BoR coated solver did not attest the requested "
-                    f"assembly={assembly_key!r}; reported "
+                    f"assembly={expected_assembly!r}; reported "
                     f"{actual_assembly or 'missing'!r}."
                 )
             if (
@@ -1681,10 +1700,10 @@ def solve_monostatic_rcs_bor(
         actual_precision = str(
             out.get("table_precision", "")
         ).strip().lower()
-        if assembly_key != "auto" and actual_assembly != assembly_key:
+        if expected_assembly != "auto" and actual_assembly != expected_assembly:
             raise RuntimeError(
                 f"BoR {kind} solver did not attest the requested "
-                f"assembly={assembly_key!r}; reported "
+                f"assembly={expected_assembly!r}; reported "
                 f"{actual_assembly or 'missing'!r}."
             )
         if (
@@ -1749,6 +1768,8 @@ def solve_monostatic_rcs_bor(
                     "linear_backward_error": backward_error,
                 })
         per_freq_meta.append({
+            "modal_execution": out.get("modal_execution"),
+            "bor_execution_options": current_options(),
             "frequency_ghz": float(freq_ghz),
             "modes_used": int(out["modes_used"]),
             "mode_cap": int(out.get("mode_cap", out["modes_used"])),
@@ -2037,12 +2058,13 @@ def solve_monostatic_rcs_bor(
                 condition_missing_count == 0
                 and len(per_freq_meta) > 0
             ),
-            "condition_est_method": "lapack_gecon_1norm",
+            "condition_est_method": ("compressed_original_1norm_onenormest" if compressed_requested()
+                                     else "lapack_gecon_1norm"),
             "quality_gate": quality_gate,
             "cfie_alpha": float(cfie_alpha),
             "workers": int(workers),
             "far_table_controls_applicable": bool(kind in ("conductor", "sheet")),
-            "assembly_requested": assembly_key,
+            "assembly_requested": expected_assembly,
             "table_precision_requested": table_precision_key,
             "stream_budget_gb": stream_budget,
             "mesh_reference_ghz": mesh_ref_ghz,
@@ -2073,6 +2095,7 @@ def _bor_channel_result(
 
 
 @profiled_solve
+@configured
 def solve_monostatic_rcs_bor_certified(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
@@ -2285,6 +2308,7 @@ def solve_monostatic_rcs_bor_certified(
 
 
 @profiled_solve
+@configured
 def solve_monostatic_rcs_bor_survey(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',

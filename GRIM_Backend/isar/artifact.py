@@ -20,6 +20,7 @@ import zlib
 
 import numpy as np
 from numpy.lib import format as npformat
+from .quality import ENGINE_VERSION
 
 
 ISAR_ARTIFACT_SCHEMA = "grim.isar-result.v2"
@@ -434,6 +435,20 @@ def build_isar_manifest(
                 "y_extent": [float(y_axis[0]), float(y_axis[-1])],
                 "phase_coverage": float(band.get("phase_coverage", 1.0)),
                 "sampling": _json_safe(band.get("sampling", {})),
+                **{key: _json_safe(band.get(key, {})) for key in (
+                    "accuracy_plan", "image_contract", "psf", "native_residual",
+                    "memory_budget", "spatial_frequency_support",
+                )},
+                **{key: _json_safe(band.get(key, 0)) for key in (
+                    "az_gap_count", "freq_gap_count", "az_gap_fraction", "freq_gap_fraction",
+                    "az_largest_gap", "freq_largest_gap",
+                )},
+                "gap_units": {"az_largest_gap": "degrees", "freq_largest_gap": "Hz"},
+                "resolved_reconstruction": str(band.get("resolved_reconstruction", params["recon"])),
+                "composite_sublooks": _json_safe(band.get("composite_sublooks", [])),
+                "composite_look_diagnostics": _json_safe(band.get("composite_look_diagnostics", [])),
+                "composite_aggregation": band.get("composite_aggregation"),
+                "scene_cropped": bool(band.get("scene_cropped", False)),
                 "azimuth_spacing_spread": float(
                     band.get("az_nonuniformity", 0.0)
                 ),
@@ -452,7 +467,7 @@ def build_isar_manifest(
     manifest = {
         "schema": ISAR_ARTIFACT_SCHEMA,
         "created_utc": datetime.now(timezone.utc).isoformat(),
-        "software": {"application": "GRIM", "isar_engine_schema": 1},
+        "software": {"application": "GRIM", "isar_engine_schema": 2, "isar_engine_version": ENGINE_VERSION},
         "source": {
             "path": str(getattr(dataset, "source_path", "") or ""),
             "history": str(getattr(dataset, "history", "") or ""),
@@ -476,6 +491,10 @@ def build_isar_manifest(
         "formation": {
             "reconstruction": str(params["recon"]),
             "window": str(params["window_name"]),
+            "aperture_mode": str(params.get("aperture_mode", "auto")),
+            "scene_half_extent_m": _json_safe(params.get("scene_half_extent_m")),
+            "composite_side": int(params.get("composite_side", 1024)),
+            "native_diagnostics": bool(params.get("native_diagnostics", True)),
             "length_unit": str(params["unit_name"]),
             "azimuth_target_degrees": (
                 None if target is None else np.asarray(target, dtype=float).tolist()
@@ -877,13 +896,20 @@ def save_isar_artifact(
     return destination
 
 
-def load_isar_artifact(path) -> tuple[dict[str, Any], list[dict[str, np.ndarray]]]:
+def load_isar_artifact(path, *, maximum_working_bytes=None) -> tuple[dict[str, Any], list[dict[str, np.ndarray]]]:
     """Load and validate an ISAR artifact without enabling pickle."""
 
     source = Path(path).expanduser().resolve()
     source_stream = source.open("rb")
     try:
         headers = _preflight_npz_archive(source_stream)
+        if maximum_working_bytes is not None:
+            budget = int(maximum_working_bytes)
+            required = sum(_normalized_array_bytes(key, h["dtype"], h["cells"], h["payload_bytes"])
+                + (4 * h["cells"] if key.endswith("_complex_image") else 0)
+                for key, h in headers.items() if key != "manifest_json")
+            if budget <= 0 or required > budget:
+                raise ValueError(f"ISAR artifact requires {required / 1024**2:.1f} MiB; viewer budget is {budget / 1024**2:.1f} MiB")
         source_stream.seek(0)
     except Exception:
         source_stream.close()

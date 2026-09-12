@@ -8,20 +8,22 @@ from ghost_backend.execution.metrics import timed_stage
 
 
 class CompressedFactor:
-    def __init__(self,operator,diagnostics=None,label='compressed system',evidence=None,checkpoint=None,**kwargs):
+    def __init__(self,operator,diagnostics=None,label='compressed system',evidence=None,checkpoint=None,
+                 storage_budget_bytes=None, check_precision=True, **kwargs):
         from ghost_backend.compressed.runtime import storage_budget
         from ghost_backend.linalg.refined_lu import requested_precision
-        if requested_precision()!='double':raise ValueError('Compressed factorization requires double precision.')
+        if check_precision and requested_precision()!='double':raise ValueError('Compressed factorization requires double precision.')
         self.a=operator;self.diagnostics=diagnostics;self.label=label
         self.checkpoint=checkpoint or operator.checkpoint
         self.matrix_inf=max(float(np.max(operator.row_norm-operator.row_error)),0.)
         self.relative_residual=np.empty(0)
         self.factor=None;self.reported=0
-        self.budget=storage_budget()-operator.bytes-getattr(operator,'reserved_partner_bytes',0)
+        allowance = storage_budget() if storage_budget_bytes is None else int(storage_budget_bytes)
+        self.budget=allowance-operator.bytes-getattr(operator,'reserved_partner_bytes',0)
         if self.budget<=0:raise MemoryError('No compressed inverse storage remains.')
         self.event=dict(unknowns=operator.n,factorizations=0,rhs_batches=0,max_rhs_columns=0,
             max_backward_error=0.,max_relative_residual=0.,compressed=operator.evidence,
-            preconditioners=[],gmres_columns=0,max_refinements=0)
+            preconditioners=[],gmres_columns=0,max_refinements=0,refinement_steps=0)
         if evidence is not None:evidence.append(self.event)
         rejected=False
         try:self._build(1e-6)
@@ -70,6 +72,7 @@ class CompressedFactor:
             worst=float(np.max(errors))
             if step==9 or not np.isfinite(worst) or step>1 and worst>previous*1.2:break
             previous=worst;x[:,bad]+=self.factor.apply(residual[:,bad],solve=True,trans=trans)
+            self.event['refinement_steps']+=1
         self.event['gmres_columns']+=int(np.sum(bad))
         action=LinearOperator(self.a.shape,matvec=lambda z:self.a.matmul(z,trans),dtype=complex)
         inverse=LinearOperator(self.a.shape,matvec=lambda z:self.factor.apply(z,solve=True,trans=trans),dtype=complex)

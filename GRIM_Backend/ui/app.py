@@ -67,7 +67,7 @@ from GRIM_Backend.ui.dataset_actions import (
 from GRIM_Backend.plotting.actions import PlotOpsMixin
 from GRIM_Backend.reports.workspace import DatasetCatalogEntry, PptWorkspace
 from GRIM_Backend.plotting.models import PlotContext
-from GRIM_Backend.runs.workspace import RunsWorkspace
+from GRIM_Backend.ui.delta_map_controls import DeltaMapControls
 
 from GRIM_Backend.ui.palette import (
     APPLICATION_PALETTES,
@@ -97,6 +97,7 @@ PLOT_OPS_SPECS = {
             ("Elevation Sweep", "elevation_sweep"),
             ("Waterfall", "waterfall"),
             ("RF Compare", "compare"),
+            ("Delta Map", "delta_map"),
         ),
         (
             ("Fit X", "fit_x"),
@@ -429,8 +430,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             ("Incoherent +", "btn_incoherent_add"),
             ("Incoherent -", "btn_incoherent_sub"),
             ("Δ dB", "btn_dbdiff"),
-            ("Join", "btn_join"),
-            ("Merge Overlaps...", "btn_stitch"),
+            ("Join / Merge…", "btn_join"),
             ("Overlap", "btn_overlap"),
         ))
         _ops_pad("Transform", (
@@ -492,8 +492,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             ("El→Az360", "btn_el_to_az360"),
             ("Swap El/Az", "btn_swap_el_az"),
             ("SENTRi El→GRIM", "btn_sentri_elevation"),
-            ("→ dBke", "btn_to_dbke"),
-            ("→ dBsm", "btn_to_dbsm"),
+            ("Extrusion…", "btn_extrusion"),
             ("Conic ↔ GC (0°)", "btn_conic_gc"),
             ("Wedge → Conic", "btn_wedge_to_conic"),
         ))
@@ -553,14 +552,10 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                 "and may be display-floored by logarithmic plots."
             ),
             "btn_join": (
-                "Union existing axis bins without interpolation using a fixed 1e-6 "
-                "native-axis tolerance. Equal or complementary samples merge; any "
-                "conflicting finite overlap stops the operation."
-            ),
-            "btn_stitch": (
-                "Union existing axis bins without interpolation, then deliberately "
-                "resolve conflicting overlaps by selection priority, linear-power "
-                "average, or coherent-field average. GRIM reports the outcome first."
+                "Union existing axis bins without interpolation. The default rejects "
+                "conflicting finite overlaps; choose a merge policy to resolve "
+                "conflicting overlaps by selection priority, linear-power average, "
+                "or coherent-field average. Native-axis tolerance defaults to 1e-6."
             ),
             "btn_slice": (
                 "Crop using selected parameter values or numeric min/max/stride controls. "
@@ -574,9 +569,10 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                 "repeated grid is explicitly needed."
             ),
             "btn_percentile": (
-                "Replace every azimuth sample in each selected dataset with the "
-                "user-entered linear-power percentile across azimuth. The default "
-                "is the 90th percentile; all original axes are preserved."
+                "Compute a linear-power percentile across azimuth (90th by default). "
+                "Creates compact output with one aggregate azimuth; elevation, "
+                "frequency, and polarization are preserved. Use Stats to repeat "
+                "the statistic across the original grid when needed."
             ),
             "btn_align": (
                 "Align every later operand to the first operand's coordinates. Matching "
@@ -616,13 +612,10 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             "btn_swap_el_az": (
                 "Transpose elevation and azimuth axes, samples, and their unit metadata."
             ),
-            "btn_to_dbke": (
-                "Convert 3-D sigma (dBsm) to 2-D extrusion width (dBke) using frequency. "
-                "Dimensionless power ratios are not accepted."
-            ),
-            "btn_to_dbsm": (
-                "Convert 2-D extrusion width (dBke) to 3-D sigma (dBsm) using frequency. "
-                "Dimensionless power ratios are not accepted."
+            "btn_extrusion": (
+                "Estimate between 3-D sigma (dBsm) and 2-D width (dBke). Choose "
+                "conversion direction and extrusion length in one dialog; assumes "
+                "broadside illumination of a uniform extrusion. Power ratios are rejected."
             ),
         }
         for attr, tooltip in operation_tooltips.items():
@@ -697,20 +690,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         # connect its CSV outputs to GRIM's RCS dataset loader.
         self.freddy_integration = FreddyIntegrationWidget(self)
 
-        # Remote HPC requests are declarative on Windows and become final,
-        # provenance-bound GHOST runs only after staging on the Linux login
-        # node.  The workspace also keeps a manual bundle-export path for
-        # clusters whose VPN/MFA policy blocks non-interactive SSH.
-        self.runs_workspace = RunsWorkspace(
-            self,
-            backend_path=self.ghost_integration.backend_path,
-        )
-        runs_controls_content = getattr(
-            self.runs_workspace, "controls_content", None
-        )
-        if runs_controls_content is not None:
-            runs_controls_content.setObjectName("runsControlsContent")
-
         # A deliberately small, read-only view of the semantic dataset/plot
         # operations performed in this session.  The recorder ignores UI
         # navigation, selection gestures, zooming, and solver/tool tabs.
@@ -764,7 +743,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             ("GHOST", self.ghost_integration, None),
             ("Assembly", self.assembly_workspace, None),
             ("PPT", self.ppt_workspace, None),
-            ("Runs", self.runs_workspace, None),
             ("Python", self.tab_python, None),
         ):
             tab_index = self.main_tabs.addTab(widget, label)
@@ -848,10 +826,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.ghost_integration.files_exported.connect(
             self._on_ghost_files_exported
         )
-        self.runs_workspace.status_changed.connect(self.status.showMessage)
-        self.runs_workspace.results_downloaded.connect(
-            self._on_hpc_results_downloaded
-        )
         freddy_attach = getattr(
             self.freddy_integration, "attach_to_ghost_requested", None
         )
@@ -867,6 +841,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.table.customContextMenuRequested.connect(self._on_dataset_context_menu)
         self.table.horizontalHeader().sectionDoubleClicked.connect(self._on_dataset_header_double_clicked)
         for context in self._plot_contexts.values():
+            context.delta_map_controls.changed.connect(self._on_delta_map_controls_changed)
             context.spin_compare_az_min.editingFinished.connect(
                 self._on_compare_sector_controls_changed
             )
@@ -906,6 +881,8 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                 controls["waterfall"].clicked.connect(self._plot_waterfall)
             if "compare" in controls:
                 controls["compare"].clicked.connect(self._plot_compare)
+            if "delta_map" in controls:
+                controls["delta_map"].clicked.connect(self._plot_delta_map)
             if "clear" in controls:
                 controls["clear"].clicked.connect(self._clear_plot)
             if "fit_x" in controls:
@@ -942,6 +919,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                 "elevation_sweep",
                 "waterfall",
                 "compare",
+                "delta_map",
                 "az_vs_range",
             ):
                 button = controls.get(recorded_mode)
@@ -962,7 +940,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.btn_stats.clicked.connect(self._statistics_selected)
         self.btn_percentile.clicked.connect(self._percentile_selected)
         self.btn_join.clicked.connect(self._join_selected_datasets)
-        self.btn_stitch.clicked.connect(self._stitch_selected_datasets)
         self.btn_overlap.clicked.connect(self._overlap_selected_datasets)
         self.btn_align.clicked.connect(self._align_selected)
         self.btn_interpolate.clicked.connect(self._interpolate_selected)
@@ -990,8 +967,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.btn_sentri_elevation.clicked.connect(
             self._convert_sentri_elevation_selected
         )
-        self.btn_to_dbke.clicked.connect(self._convert_to_dbke_selected)
-        self.btn_to_dbsm.clicked.connect(self._convert_to_dbsm_selected)
+        self.btn_extrusion.clicked.connect(self._convert_extrusion_selected)
         self.btn_conic_gc.clicked.connect(self._convert_conic_gc_selected)
         self.btn_wedge_to_conic.clicked.connect(self._convert_wedge_to_conic_selected)
         self.btn_dataset_load.clicked.connect(self._load_dataset_files)
@@ -1046,6 +1022,18 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             # stepping/playing is the point of the scrub workflow, and the
             # async compute path coalesces bursts of requests.
             if tab_key == "isar":
+                from GRIM_Backend.ui.isar_controls import sync_reconstruction_controls
+                sync_reconstruction_controls(context)
+                context.combo_isar_recon.currentTextChanged.connect(
+                    lambda _=None, c=context: sync_reconstruction_controls(c))
+                context.isar_advanced.changed.connect(self._invalidate_isar_result)
+                for name, method in (
+                    ("plan", self._plan_isar_image), ("cancel", self._cancel_isar),
+                    ("open", self._open_isar_result), ("compare", self._compare_isar_result),
+                    ("save_recipe", self._save_isar_recipe), ("load_recipe", self._load_isar_recipe),
+                    ("guide", self._show_isar_workflow),
+                ):
+                    getattr(context.isar_tools, name).clicked.connect(method)
                 # Numerical exports and the visible canvas are bound to the
                 # exact controls that produced them. Deferred settings edits
                 # therefore invalidate immediately even before Apply; live
@@ -1071,7 +1059,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                     (context.spin_isar_ap_width, "valueChanged"),
                 ):
                     getattr(widget, signal_name).connect(
-                        self._invalidate_isar_result
+                        lambda _=None, w=widget, c=context: self._isar_control_changed(c, w)
                     )
                 for widget, signal_name in (
                     (context.chk_isar_square, "toggled"),
@@ -1290,6 +1278,11 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         topbar.addWidget(btn_export_plot)
         topbar.addWidget(btn_settings)
         left_layout.addLayout(topbar)
+        isar_tools = None
+        if tab_key == "isar":
+            from GRIM_Backend.ui.isar_controls import IsarTools
+            isar_tools = IsarTools(panel)
+            left_layout.addWidget(isar_tools)
 
         settings_frame = PlotSettingsPopup(panel, title=settings_title)
         settings_frame.setObjectName(f"{tab_key}SettingsPopup")
@@ -1489,14 +1482,14 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         )
         settings_layout.addWidget(chk_isar_freq_band, row, 0)
         spin_isar_freq_min = QDoubleSpinBox()
-        spin_isar_freq_min.setRange(0.0, 10000.0)
+        spin_isar_freq_min.setRange(0.0, 1.0e100)
         spin_isar_freq_min.setDecimals(4)
         spin_isar_freq_min.setSingleStep(0.5)
         spin_isar_freq_min.setValue(0.0)
         spin_isar_freq_min.setToolTip("Lower frequency limit for ISAR imaging.")
         settings_layout.addWidget(spin_isar_freq_min, row, 1)
         spin_isar_freq_max = QDoubleSpinBox()
-        spin_isar_freq_max.setRange(0.0, 10000.0)
+        spin_isar_freq_max.setRange(0.0, 1.0e100)
         spin_isar_freq_max.setDecimals(4)
         spin_isar_freq_max.setSingleStep(0.5)
         spin_isar_freq_max.setValue(18.0)
@@ -1549,6 +1542,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             "means the solution is not certified."
         )
         settings_layout.addWidget(spin_isar_l1_iters, row, 3)
+        combo_isar_recon.addItem("Recommended PFA (scene-aware)")
         chk_isar_flip_x = QCheckBox("Flip X")
         chk_isar_flip_x.setToolTip(
             "Mirror the image about x=0 (swap left/right). Use when the "
@@ -1639,6 +1633,11 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         settings_layout.addWidget(btn_isar_apply, row, 2, 1, 4)
         row += 1
 
+        from GRIM_Backend.ui.isar_controls import AdvancedIsarControls
+        isar_advanced = AdvancedIsarControls(isar_settings_section)
+        settings_layout.addWidget(isar_advanced, row, 0, 1, 6)
+        row += 1
+
         isar_settings_layout = settings_layout
         settings_layout = common_settings_layout
         row = common_row
@@ -1702,7 +1701,9 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         palette = getattr(self, "application_palette", BLUE_PALETTE)
         plot_figure = Figure(facecolor=palette["panel_bg"])
         plot_canvas = FigureCanvas(plot_figure)
-        plot_canvas.setMinimumSize(320, 240)
+        # Reserve a few readable quality lines while allowing the ISAR canvas
+        # to shrink on compact displays; it expands into all remaining space.
+        plot_canvas.setMinimumSize(320, 176 if tab_key == 'isar' else 240)
         plot_canvas.setStyleSheet("background: transparent;")
         plot_ax = plot_figure.add_subplot(111)
         plot_ax.set_facecolor(palette["panel_bg"])
@@ -1748,11 +1749,14 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         compare_sector_layout.addStretch(1)
         compare_sector_bar.setVisible(False)
         plot_layout.addWidget(compare_sector_bar)
+        delta_map_controls = DeltaMapControls()
+        plot_layout.addWidget(delta_map_controls)
         plot_layout.addWidget(plot_canvas, 1)
         hover_readout = QLabel("x: --   y: --")
         hover_readout.setObjectName("hoverReadout")
         hover_readout.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        plot_layout.addWidget(hover_readout, 0, Qt.AlignLeft)
+        hover_readout.setWordWrap(True)
+        plot_layout.addWidget(hover_readout, 0)
         plot_canvas.mpl_connect(
             "motion_notify_event",
             lambda event, lbl=hover_readout: self._schedule_hover(event, lbl),
@@ -1788,6 +1792,8 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                     "azimuths expands only the displayed traces. Reports concordance, "
                     "linear and dB error, peak alignment, and local-sector agreement."
                 )
+            if role == "delta_map":
+                btn.setToolTip("Signed A - B level differences for two datasets over two selected axes; choose the fixed third coordinate in the plot controls.")
             return btn
 
         # Legend toggle sits at the head of the toolbar (left of Hold); it
@@ -1818,6 +1824,8 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         left_layout.insertWidget(1, plot_ops_bar)
 
         return PlotContext(
+            isar_advanced=isar_advanced,
+            isar_tools=isar_tools,
             btn_export_plot=btn_export_plot,
             btn_dataset_ops=btn_dataset_ops,
             btn_settings=btn_settings,
@@ -1881,6 +1889,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             plot_text_color=None,
             last_plot_mode=None,
             btn_export_isar_result=btn_export_isar_result,
+            delta_map_controls=delta_map_controls,
         )
 
     def _move_shared_right_panel(self, tab_key: str) -> None:
@@ -1951,6 +1960,9 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.btn_pan = controls.get("pan")
 
         context = self._plot_contexts[tab_key]
+        if tab_key == "isar":
+            from GRIM_Backend.ui.isar_controls import sync_frequency_controls
+            sync_frequency_controls(context, getattr(self, "active_dataset", None))
         for field in PlotContext.__dataclass_fields__:
             setattr(self, field, getattr(context, field))
 
@@ -2201,29 +2213,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         )
         self._handle_files_dropped(exported)
 
-    def _on_hpc_results_downloaded(self, directory: str) -> None:
-        """Load supported datasets found beneath a downloaded HPC result tree."""
-
-        root = Path(os.fspath(directory)).expanduser()
-        if not root.is_dir():
-            self.status.showMessage(
-                f"HPC results downloaded, but the local folder was not found: {root}"
-            )
-            return
-        paths = sorted(
-            str(path)
-            for path in root.rglob("*")
-            if path.is_file() and is_supported_path(str(path))
-        )
-        if not paths:
-            self.status.showMessage(
-                f"HPC results downloaded to {root}; no supported datasets were found."
-            )
-            return
-        self.status.showMessage(
-            f"Loading {len(paths)} downloaded HPC dataset(s) from {root}…"
-        )
-        self._handle_files_dropped(paths)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API name
         """Keep the unified app alive while background physics work runs."""
@@ -2344,19 +2333,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             self.freddy_integration.focus_workspace()
             event.ignore()
             return
-        if self.runs_workspace.job_is_running():
-            operation = self.runs_workspace.busy_operation() or "An HPC operation"
-            QMessageBox.warning(
-                self,
-                "HPC Operation Still Running",
-                f"{operation} is still running. Wait for it to finish before "
-                "closing GRIM. Submitted SLURM jobs do not require GRIM to stay open.",
-            )
-            self.main_tabs.setCurrentWidget(self.runs_workspace)
-            self.runs_workspace.focus_workspace()
-            event.ignore()
-            return
-
         feature_request_close = getattr(
             self.feature_assembly_panel, "request_close", None
         )
@@ -2437,7 +2413,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                 )
                 event.ignore()
                 return
-        self.runs_workspace.save_settings()
         dispose_ppt = getattr(self.ppt_workspace, "dispose", None)
         if callable(dispose_ppt):
             dispose_ppt()
