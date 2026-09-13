@@ -225,6 +225,14 @@ assert study_template()['cases']
                 ram_budget_gib=2, assembly_threads='auto', blas_threads=1,
                 rhs_compression='on', angle_batch_size=17)))
 
+    def test_automatic_batch_choice_reaches_fresh_worker(self):
+        from ghost_backend.execution.options import validate_options
+        self._run_material_case('2d', BACKEND / "validation" /
+            'pec_backed_ibc/example/2d_outer_envelope.geo', certified=False,
+            execution=validate_options(dict(factorization='adaptive', compressed_storage_mib=64,
+                ram_budget_gib=.8, assembly_threads=1, blas_threads=1,
+                rhs_compression='on', angle_batch_size=17)))
+
     def test_manifest_preserves_environment_selection_without_explicit_driver_profile(self):
         from ghost_backend.execution.options import validate_options
         self._run_material_case('2d', BACKEND / "validation" /

@@ -70,6 +70,15 @@ OPN_DIR = "ghost_backend/geometry/geometries/OPN"
 FREQUENCIES_GHZ = [2.0, 4.0, 6.0, 8.0, 10.0]
 AZIMUTHS_DEG    = [0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0]
 
+# Solve configuration: one preset shared with the desktop geometry presets.
+# auto: minimize predicted batch completion time using dense/compressed workers.
+# small: reference/dense, no basis reuse; balanced: streaming/dense;
+# large: streaming/compressed. All named presets use double precision.
+SOLVE_PRESET = "auto"             # "auto" | "small" | "balanced" | "large"
+# Optional execution fields, e.g. {"assembly_threads": 2, "angle_batch_size": 128}.
+# Leave empty for preset defaults. See RUN_PROFILES.md for supported overrides.
+ADVANCED_OVERRIDES = {}
+
 # Output root. A new run_YYYYMMDD_HHMMSS/ subfolder is created inside.
 OUTPUT_DIR = "ghost_backend/results/rcs_runs"
 
@@ -78,25 +87,11 @@ OUTPUT_DIR = "ghost_backend/results/rcs_runs"
 # setting.
 WORKERS = None
 
-# Solver settings for both physical channels (VV/TE and HH/TM).
-GEOMETRY_UNITS          = "inches"       # "inches" or "meters"
-MAX_PANELS              = 50_000
-BLAS_THREADS_PER_WORKER = efficient_defaults()['blas_threads']
-
-# Mesh-convergence certification. True solves every unit twice -- the requested
-# mesh and one refined by the policy's fine_factor -- and publishes the fine
-# result only if the two agree. That second solve is where most of the wall
-# clock and all of the peak memory go, because cost scales with the square of
-# the node count: turning it off is about 3x faster per unit and roughly halves
-# the memory, so more units fit in RAM at once as well.
-#
-# With this off the algebraic quality gate still runs, but no base/fine mesh
-# comparison is performed.  The choice is recorded for provenance and does not
-# prevent downstream viewing, combination, or subtraction.
-MESH_CERTIFICATION      = True
-ACCURACY_TARGET         = "standard"     # "standard" | "tight"; mesh comparison limits
-SOLVER_METHOD           = "experimental_cpu"       # "direct" | "experimental_cpu"; FP64 streamed CPU
-LU_PRECISION            = "double"       # "double" | "mixed"; CPU LU with refinement
+# Solver accuracy; presets retain these choices.
+GEOMETRY_UNITS = "inches"         # "inches" | "meters"
+MAX_PANELS = 50_000
+MESH_CERTIFICATION = True        # compare base/refined meshes before export
+ACCURACY_TARGET = "standard"     # "standard" | "tight"
 
 # --- Memory admission ------------------------------------------------------
 # A local machine has far less RAM than a compute node and is usually running
@@ -119,12 +114,6 @@ MAX_SOLVE_GB    = None            # Hard ceiling on ONE solve's estimated
                                   # deliberately larger than this machine's RAM
                                   # against swap, or to refuse earlier.
 
-# Threads each solve may use inside the boundary-operator assembly. "auto"
-# gives every concurrent solve an equal share of the cores -- which is what a
-# local run usually wants, since it typically has fewer units in flight than
-# the machine has cores.
-ASSEMBLY_THREADS        = efficient_defaults()['assembly_threads']         # "auto", or an integer >= 1
-
 # Pool worker lifetime, in units, so allocator growth from a big solve cannot
 # accumulate across a long sweep. The solver is imported in the parent, so a
 # respawn costs a fork rather than a re-import of numpy, SciPy, and the solver.
@@ -140,9 +129,18 @@ from ghost_backend.runs.config import (
     copy_configuration,
 )
 _CONFIG_KIND = '2d'
+# Legacy custom profiles remain supported by --config and old request bundles.
+# For direct edits to these aliases, set SOLVE_PRESET="custom". Named presets
+# use ADVANCED_OVERRIDES for execution settings and MAX_SOLVE_GB for RAM.
+SOLVER_METHOD = "experimental_cpu"
+LU_PRECISION = "double"
+BLAS_THREADS_PER_WORKER = efficient_defaults()['blas_threads']
+ASSEMBLY_THREADS = efficient_defaults()['assembly_threads']
 EXECUTION_OPTIONS = None
 
 _CONFIG_KEYS = (
+    'SOLVE_PRESET',
+    'ADVANCED_OVERRIDES',
     'EXECUTION_OPTIONS',
     'FRD_DIR',
     'OPN_DIR',
@@ -381,45 +379,25 @@ def _solve_and_export_star(args: 'tuple') -> 'tuple':
         return ("err", traceback.format_exc(), "")
 
 
-def _plan(
-    units: 'List[Dict[str, Any]]',
-    fine_factor: 'float',
-    n_angles: 'int',
-) -> 'Tuple[Dict[str, float], Dict[str, float]]':
-    """Cost both channels and reserve their sequential peak per output unit."""
-
-    resource_cache: 'Dict[Tuple[str, float], List[Dict[str, Any]]]' = {}
-    costs: 'Dict[str, float]' = {}
-    peaks: 'Dict[str, float]' = {}
+def _plan(units, fine_factor, n_angles, records_out=None):
+    """Share preparation across a geometry's frequencies and polarizations."""
+    from ghost_backend.runs.batch import combine_channels
+    grouped = {}
     for unit in units:
-        key = (str(unit["geometry"]), float(unit["frequency_ghz"]))
-        if key not in resource_cache:
-            resource_cache[key] = [
-                hpc_scheduler.predict_2d_resources(
-                    key[0], key[1], polarization, GEOMETRY_UNITS,
-                    MAX_PANELS, fine_factor=fine_factor,
-                    n_angles=n_angles, safety=float(MEMORY_SAFETY),
-                    solver_method=SOLVER_METHOD,
-                )
-                for polarization in ("TM", "TE")
-            ]
-        plans = resource_cache[key]
-        name = _unit_name(unit)
-        costs[name] = sum(
-            hpc_scheduler.unit_cost(
-                int(planned["nodes"]), n_angles, fine_factor,
-                fine_nodes=int(planned["fine_nodes"]),
-                system_dofs=int(planned["base_system_dofs"]),
-                fine_system_dofs=int(planned["fine_system_dofs"]),
-                operator_matrices=int(planned["base_operator_matrices"]),
-                fine_operator_matrices=int(planned["fine_operator_matrices"]),
-            )
-            for planned in plans
-        )
-        # The canonical API solves the two formulations sequentially while
-        # retaining only their compact sample arrays, so peak dense storage is
-        # the larger channel rather than their sum.
-        peaks[name] = max(float(planned["peak_gb"]) for planned in plans)
+        grouped.setdefault(str(unit['geometry']), []).append(unit)
+    costs, peaks = {}, {}
+    for geometry, group in grouped.items():
+        batch = hpc_scheduler.predict_2d_resources_many(geometry,
+            sorted({float(u['frequency_ghz']) for u in group}), ['TM', 'TE'],
+            GEOMETRY_UNITS, MAX_PANELS, fine_factor=fine_factor,
+            n_angles=n_angles, safety=float(MEMORY_SAFETY), solver_method=SOLVER_METHOD)
+        for unit in group:
+            name = _unit_name(unit)
+            plans = [batch[(float(unit['frequency_ghz']), pol)] for pol in ('TM', 'TE')]
+            record = dict(unit=name, **combine_channels(plans, n_angles, fine_factor))
+            costs[name], peaks[name] = record['cost'], record['peak_gb']
+            if records_out is not None:
+                records_out.append(record)
     return costs, peaks
 
 
@@ -526,6 +504,7 @@ def main() -> 'None':
     (results_dir / "FRD").mkdir()
     (results_dir / "OPN").mkdir()
     solver_config = {
+        "solve_preset": SOLVE_PRESET,
         "geometry_units": GEOMETRY_UNITS,
         "linear_solver": "dense_lu",
         "polarizations": list(OUTPUT_POLARIZATIONS),
@@ -586,7 +565,8 @@ def main() -> 'None':
     fine_factor = (
         float(mesh_policy["fine_factor"]) if MESH_CERTIFICATION else 1.0
     )
-    costs, peaks = _plan(units, fine_factor, len(azimuths))
+    planning_records = []
+    costs, peaks = _plan(units, fine_factor, len(azimuths), planning_records)
     # Sorted into a new list, never in place: `units` is the same object the
     # manifest holds, and reordering it after the run fingerprint was taken
     # would make the manifest on disk hash differently from what every
@@ -602,6 +582,13 @@ def main() -> 'None':
     budget_gb = max(1.0, memory_gb * float(MEMORY_HEADROOM))
     worker_cap = max(1, cores - 1) if WORKERS is None else int(WORKERS)
     pool_size = max(1, min(cores, worker_cap, len(ordered)))
+    from ghost_backend.runs.batch import apply_batch_choices
+    resolved, batch_selections, batch_summary = apply_batch_choices(
+        planning_records, cores, pool_size, budget_gb, current_options())
+    for record in resolved:
+        costs[record['unit']], peaks[record['unit']] = record['cost'], record['peak_gb']
+    ordered = sorted(units, key=lambda u: (-costs[_unit_name(u)], _unit_name(u)))
+    _write_json_atomic(run_dir / 'schedule.json', dict(units=resolved, batch_selection=batch_summary))
     heaviest = max((peaks.get(_unit_name(u), 0.0) for u in ordered), default=0.0)
     heaviest_concurrency = (
         pool_size if heaviest <= 0.0
@@ -666,7 +653,8 @@ def main() -> 'None':
         return (
             name, peak_gb,
             (_solve_and_export_star,
-             ((unit, context, str(results_dir), assembly_threads),)),
+             ((unit, dict(context, batch_backend_selection=batch_selections.get(name)),
+               str(results_dir), assembly_threads),)),
         )
 
     def _finished():

@@ -1,6 +1,21 @@
 """Conservative RAM-aware choice between existing dense and compressed paths."""
 import math
 from ghost_backend.execution.options import execution_scope, validate_options
+from ghost_backend.execution.runtime import ScopedValue
+
+_BATCH_SELECTION = ScopedValue('ghost_batch_backend_selection', default=None)
+
+
+def batch_selection_scope(value):
+    if value is not None and (value.get('requested') != 'adaptive' or
+                              value.get('selected') not in ('dense', 'compressed')):
+        raise ValueError('Invalid batch backend selection.')
+    return _BATCH_SELECTION.override(value)
+
+
+def current_batch_selection():
+    value = _BATCH_SELECTION.get()
+    return dict(value) if value is not None else None
 
 
 def select_backend(arguments, options, certified=False, checkpoint=None):

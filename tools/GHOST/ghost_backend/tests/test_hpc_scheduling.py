@@ -1032,13 +1032,17 @@ def test_end_to_end():
         schedule = json.loads((run_dir / "schedule.json").read_text())
         check(schedule.get("planning", {}).get("method") == "batched_exact",
               "schedule records the batched exact planning method")
-        check("Planning exact resources" in result.stdout
+        check("Planning mesh/storage bounds" in result.stdout
+              and "no coefficient sampling" in result.stdout
               and "Resource plan ready" in result.stdout,
               "submit output reports resource-planning progress and timing")
         check(all(int(r["nodes"]) > 0 for r in schedule["units"]),
               "every unit was pre-meshed for its cost estimate")
         check(all(float(r["peak_gb"]) > 0 for r in schedule["units"]),
               "every unit carries a memory estimate")
+        check(all(set(r.get('backend_candidates', {})) == {'dense', 'compressed'}
+                  for r in schedule['units']),
+              "default auto captures both candidates before reaching a compute node")
         costs = {r["unit"]: r["cost"] for r in schedule["units"]}
         by_freq = {}
         for name, cost in costs.items():

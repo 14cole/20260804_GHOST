@@ -37,10 +37,12 @@ geometry operations, feature assembly, and run management. The
 New 2D monostatic GUI and local/HPC runs default to the
 [CPU streaming (experimental) solver method](EXPERIMENTAL_CPU.md) for lower
 angle-workspace RAM and CPU acceleration of PEC/IBC and dielectric solves.
-The default [compressed CPU assembly path](COMPRESSED_CPU.md) avoids the
+The desktop's default [compressed CPU assembly path](COMPRESSED_CPU.md) avoids the
 global dense matrix and LU for supported 2D formulations. The saved resource
 preset uses 8192 MiB compressed storage, four assembly/two BLAS threads, automatic
 basis reuse, and 256-angle batches. Dense LU remains selectable for smaller runs.
+Batch scripts default to automatic dense/compressed selection for predicted
+batch completion time.
 
 The visible **Geometry preset** selector offers **Small Geometry (No RAM
 Optimization)**, **Large Geometry (RAM Optimization)**, **Balanced**, and
@@ -57,6 +59,10 @@ optional local material meshing, faster geometry validation, and desktop
 frequency checkpoints with verified resume.
 
 Local and HPC batch drivers accept `--config path/to/settings.config.json`.
+The 2D scripts expose `SOLVE_PRESET="auto"` plus optional `ADVANCED_OVERRIDES`.
+Auto compares predicted completion of the batch with dense, compressed, and
+mixed workers on the execution node. `small`, `balanced`, and `large` select
+the corresponding desktop presets. See [batch presets](RUN_PROFILES.md).
 They also automatically load an adjacent file with the same stem and the
 `.config.json` suffix. For example:
 
@@ -66,6 +72,8 @@ They also automatically load an adjacent file with the same stem and the
   "version": 1,
   "driver": "2d",
   "settings": {
+    "SOLVE_PRESET": "auto",
+    "ADVANCED_OVERRIDES": {},
     "FRD_DIR": "ghost_backend/geometry/geometries/FRD",
     "OPN_DIR": "ghost_backend/geometry/geometries/OPN",
     "OUTPUT_DIR": "rcs_runs",

@@ -79,6 +79,8 @@ _COMMON_SETTINGS = {
 
 _SETTINGS_BY_SOLVER = {
     "2d": _COMMON_SETTINGS | {
+        "SOLVE_PRESET",
+        "ADVANCED_OVERRIDES",
         "EXECUTION_OPTIONS",
         "ARRAY_THROTTLE",
         "MEMORY_SAFETY",
@@ -607,8 +609,9 @@ def _validate_settings(solver: 'str', raw_settings: 'Any') -> 'Dict[str, Any]':
     settings = dict(raw_settings)
     if solver == '2d':
         from ghost_backend.runs.execution import reconcile_settings
+        from ghost_backend.runs.presets import resolve_preset
         try:
-            settings = reconcile_settings(settings)
+            settings = reconcile_settings(resolve_preset(settings))
         except ValueError as exc:
             raise BundleError(str(exc))
     elif 'BOR_EXECUTION_OPTIONS' in settings:

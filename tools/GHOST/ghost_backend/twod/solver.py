@@ -1597,6 +1597,7 @@ def _dense_formulation_resources(
     infos: 'List[PanelCoupledInfo]',
     pol: 'str',
     thin_parameters=None,
+    sample_compression=True,
 ) -> 'Dict[str, Any]':
     """Return system dimensions and retained-operator/workspace requirements for the
     selected formulation.
@@ -1663,7 +1664,7 @@ def _dense_formulation_resources(
         **storage,
     }
     from ghost_backend.compressed.runtime import enabled as compressed_enabled
-    if compressed_enabled() and not storage.get('analytic_zero'):
+    if sample_compression and compressed_enabled() and not storage.get('analytic_zero'):
         from ghost_backend.compressed.memory import geometry_storage
         air_k = next((i.k_plus if i.plus_region == 0 else i.k_minus for i in infos
                       if i.plus_region == 0 or i.minus_region == 0), None)

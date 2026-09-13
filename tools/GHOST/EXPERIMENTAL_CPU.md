@@ -7,9 +7,10 @@ angle is computed and checked against its original equation. No GPU is required.
 
 ## Select the option
 
-New 2D monostatic runs use **CPU streaming (experimental)** with compressed
-assembly in GHOST and local/HPC drivers. The
-[efficient resource preset](RUN_PROFILES.md) is the default for new runs.
+New desktop 2D monostatic runs use **CPU streaming (experimental)** with
+compressed assembly. Local/HPC drivers default to `SOLVE_PRESET="auto"`,
+choosing dense/compressed work to minimize predicted batch completion time.
+See [execution presets](RUN_PROFILES.md).
 Selecting CPU streaming sets LU precision to Double; mixed
 precision is a separate option and cannot be combined with this method.
 The newer optional hierarchical factor and automatic sweep compression are
@@ -29,12 +30,14 @@ For either `ghost_backend/run_local_monostatic.py` or
 configuration's `settings` object:
 
 ```json
-"SOLVER_METHOD": "experimental_cpu",
-"LU_PRECISION": "double"
+"SOLVE_PRESET": "auto",
+"ADVANCED_OVERRIDES": {}
 ```
 
-Alternatively set the corresponding constants in the driver. Existing worker,
-assembly-thread and BLAS-thread settings still apply. For one complete job at
+Alternatively set the corresponding constants in the driver. Use `large`
+to explicitly select compressed assembly, or `balanced` for dense LU with CPU
+streaming. Thread settings belong in `ADVANCED_OVERRIDES`; existing explicit
+kernel/precision profiles remain supported in custom mode. For one complete job at
 a time, use `WORKERS=1` locally or `MAX_WORKERS_PER_NODE=1` on HPC, with thread
 counts chosen for the CPUs allocated to the process. CPU streaming itself does
 not change the number of simultaneous geometry/frequency jobs.

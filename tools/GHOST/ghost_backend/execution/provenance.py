@@ -771,10 +771,12 @@ def runtime_environment_payload() -> 'Dict[str, Any]':
     from ghost_backend.linalg.sweep import mode as compression_mode
     from ghost_backend.compressed.runtime import storage_budget
     from ghost_backend.execution.options import current_options
+    profile = current_options()
+    factorization = profile['factorization'] if profile is not None else factor_mode()
     return {
-        "execution_options": current_options(),
-        "cpu_factorization": factor_mode(),
-        "compressed_storage_budget_bytes": storage_budget() if factor_mode()=='compressed' else None,
+        "execution_options": profile,
+        "cpu_factorization": factorization,
+        "compressed_storage_budget_bytes": storage_budget() if factorization in ('compressed', 'adaptive') else None,
         "cpu_rhs_compression": compression_mode(),
         "python_version": sys.version,
         "python_implementation": getattr(implementation, "name", ""),

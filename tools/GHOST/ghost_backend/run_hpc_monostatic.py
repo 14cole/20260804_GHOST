@@ -104,6 +104,15 @@ OPN_DIR = "ghost_backend/geometry/geometries/OPN"
 FREQUENCIES_GHZ = [2.0, 4.0, 6.0, 8.0, 10.0]
 AZIMUTHS_DEG    = [0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0]
 
+# Solve configuration: one preset shared with the desktop geometry presets.
+# auto: minimize predicted batch completion time using dense/compressed workers.
+# small: reference/dense, no basis reuse; balanced: streaming/dense;
+# large: streaming/compressed. All named presets use double precision.
+SOLVE_PRESET = "auto"             # "auto" | "small" | "balanced" | "large"
+# Optional execution fields, e.g. {"assembly_threads": 2, "angle_batch_size": 128}.
+# Leave empty for preset defaults. See RUN_PROFILES.md for supported overrides.
+ADVANCED_OVERRIDES = {}
+
 # Output root. A new run_YYYYMMDD_HHMMSS/ subfolder is created inside.
 OUTPUT_DIR = "ghost_backend/results/rcs_runs"
 
@@ -172,34 +181,11 @@ SLURM_EXTRA_SBATCH = []  # type: List[str]  # raw extra lines, e.g. "--constrain
 
 JOB_PROLOGUE = []  # type: List[str]
 
-# --- Solver knobs ----------------------------------------------------------
-# Solver settings for both physical channels (VV/TE and HH/TM).
-GEOMETRY_UNITS          = "inches"       # "inches" or "meters"
-MAX_PANELS              = 50_000
-
-# Mesh-convergence certification. True solves every unit twice -- the requested
-# mesh and one refined by the policy's fine_factor -- and publishes the fine
-# result only if the two agree. That second solve is where most of the wall
-# clock and all of the peak memory go, because cost scales with the square of
-# the node count: turning it off is about 3x faster per unit and roughly halves
-# the memory, so more units fit per node as well.
-#
-# With this off the algebraic quality gate still runs, but no base/fine mesh
-# comparison is performed.  The choice is recorded for provenance and does not
-# prevent the result from being viewed, combined, subtracted, or used by the
-# downstream feature workflow.
-MESH_CERTIFICATION      = True
-ACCURACY_TARGET         = "standard"     # "standard" | "tight"; mesh comparison limits
-SOLVER_METHOD           = "experimental_cpu"       # "direct" | "experimental_cpu"; FP64 streamed CPU
-LU_PRECISION            = "double"       # "double" | "mixed"; CPU LU with refinement
-BLAS_THREADS_PER_WORKER = efficient_defaults()['blas_threads']              # keeps N workers x BLAS threads sane
-
-# Threads each solve may use inside the boundary-operator assembly.
-# "auto" gives every concurrent solve an equal share of the node's cores. That
-# only matters when a node holds fewer units than it has cores -- a couple of
-# geometries at one frequency, or the tail of a sweep; with at least one unit
-# per core "auto" resolves to 1 and the process pool owns the parallelism.
-ASSEMBLY_THREADS        = efficient_defaults()['assembly_threads']         # "auto", or an integer >= 1
+# Solver accuracy; presets retain these choices.
+GEOMETRY_UNITS = "inches"         # "inches" | "meters"
+MAX_PANELS = 50_000
+MESH_CERTIFICATION = True        # compare base/refined meshes before export
+ACCURACY_TARGET = "standard"     # "standard" | "tight"
 
 # Pool worker lifetime. Each worker is replaced after this many units so
 # allocator growth from a big solve cannot accumulate across a long sweep. The
@@ -224,9 +210,18 @@ from ghost_backend.runs.config import (
     copy_configuration,
 )
 _CONFIG_KIND = '2d'
+# Legacy custom profiles remain supported by --config and old request bundles.
+# For direct edits to these aliases, set SOLVE_PRESET="custom". Named presets
+# use ADVANCED_OVERRIDES for execution settings and MAX_SOLVE_GB for RAM.
+SOLVER_METHOD = "experimental_cpu"
+LU_PRECISION = "double"
+BLAS_THREADS_PER_WORKER = efficient_defaults()['blas_threads']
+ASSEMBLY_THREADS = efficient_defaults()['assembly_threads']
 EXECUTION_OPTIONS = None
 
 _CONFIG_KEYS = (
+    'SOLVE_PRESET',
+    'ADVANCED_OVERRIDES',
     'EXECUTION_OPTIONS',
     'FRD_DIR',
     'OPN_DIR',
@@ -543,6 +538,7 @@ def _plan_schedule(units, n_slots, fine_factor, n_angles):
     and TE receive exact formulation-specific records, then their costs are
     summed and their sequential peak memory is reserved as one output unit.
     """
+    from ghost_backend.runs.batch import combine_channels
 
     resource_cache = {}  # type: Dict[Tuple[str, float, str], Dict[str, Any]]
     grouped = {}  # type: Dict[str, Dict[str, List[Any]]]
@@ -563,8 +559,8 @@ def _plan_schedule(units, n_slots, fine_factor, n_angles):
     next_report = report_step
     last_report = started
     print(
-        f"  Planning exact resources for {total} unit(s) across "
-        f"{len(grouped)} geometry file(s)...",
+        f"  Planning mesh/storage bounds for {total} channel record(s) across "
+        f"{len(grouped)} geometry file(s); no coefficient sampling...",
         flush=True,
     )
 
@@ -628,21 +624,8 @@ def _plan_schedule(units, n_slots, fine_factor, n_angles):
                 "HH": str(plans["TM"]["formulation"]),
                 "VV": str(plans["TE"]["formulation"]),
             },
-            "cost": sum(
-                hpc_scheduler.unit_cost(
-                    int(planned["nodes"]), n_angles, fine_factor,
-                    fine_nodes=int(planned["fine_nodes"]),
-                    system_dofs=int(planned["base_system_dofs"]),
-                    fine_system_dofs=int(planned["fine_system_dofs"]),
-                    operator_matrices=int(planned["base_operator_matrices"]),
-                    fine_operator_matrices=int(planned["fine_operator_matrices"]),
-                )
-                for planned in plans.values()
-            ),
-            "peak_gb": max(
-                float(planned["peak_gb"]) for planned in plans.values()
-            ),
         })
+        records[-1].update(combine_channels(list(plans.values()), n_angles, fine_factor))
     assignment = hpc_scheduler.balance_units(records, n_slots)
     for record, slot in zip(records, assignment):
         record["slot"] = int(slot)
@@ -654,6 +637,8 @@ def _plan_schedule(units, n_slots, fine_factor, n_angles):
         "fine_factor": float(fine_factor),
         "planning": {
             "method": "batched_exact",
+            "storage_forecast": "dimensions_and_payload_ceiling",
+            "coefficient_sampling": False,
             "elapsed_seconds": float(elapsed),
             "geometry_preflights": int(len(grouped)),
             "frequency_mesh_groups": int(
@@ -793,6 +778,7 @@ def submit():
         "solver_source_inventory": _solver_source_inventory(),
         "runtime_environment_sha256": runtime_environment_fingerprint(),
         "solver_config": {
+            "solve_preset": SOLVE_PRESET,
             "geometry_units":          GEOMETRY_UNITS,
             "linear_solver":           "dense_lu",
             "polarizations":           list(OUTPUT_POLARIZATIONS),
@@ -1084,6 +1070,22 @@ def worker(run_dir_str, submission_index, task_index):
     # others had started; it also left each solve with a sliver of the node
     # when the run was smaller than the cluster.
     pool_size = max(1, min(cores, worker_cap, max(1, planned)))
+    batch_selections = {}
+    if context['execution_options']['factorization'] == 'adaptive':
+        from ghost_backend.runs.batch import apply_batch_choices
+        records = json.loads((run_dir / 'schedule.json').read_text())['units']
+        if any('backend_candidates' not in r for r in records):
+            raise ValueError('Automatic batch selection requires dense/compressed forecasts; regenerate the run.')
+        for share in (planned_units, steal_units):
+            names = {_unit_name(u) for u in share if not _unit_output_path(run_dir, u).is_file()}
+            resolved, selections, summary = apply_batch_choices(
+                [r for r in records if r['unit'] in names], cores, pool_size,
+                budget_gb, context['execution_options'])
+            batch_selections.update(selections)
+            for record in resolved:
+                costs[record['unit']], peaks[record['unit']] = record['cost'], record['peak_gb']
+        planned_units, steal_units = _ordered_candidates(units, costs, slots, slot, n_slots)
+        candidates = planned_units + steal_units
     heaviest = max(
         (peaks.get(_unit_name(u), 0.0) for u in planned_units), default=0.0
     )
@@ -1153,7 +1155,8 @@ def worker(run_dir_str, submission_index, task_index):
         dispatch = (
             name, peak_gb,
             (_solve_and_export_star,
-             ((unit, context, str(run_dir), assembly_threads),)),
+             ((unit, dict(context, batch_backend_selection=batch_selections.get(name)),
+               str(run_dir), assembly_threads),)),
         )
         if _unit_output_path(run_dir, unit).is_file():
             # An already-written result is dispatched, not skipped outright, so

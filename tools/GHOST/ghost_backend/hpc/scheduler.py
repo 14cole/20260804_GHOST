@@ -285,7 +285,8 @@ def _resource_records_for_frequency(
         resources = rcs_solver._dense_formulation_resources(
             mesh, infos, canonical_pol,
             rcs_solver.layer_for_mesh(mesh, materials, freq_ghz)
-            if any(i.bc_kind == 'thin_layer' for i in infos) else None
+            if any(i.bc_kind == 'thin_layer' for i in infos) else None,
+            sample_compression=False,
         )
         records[requested_pol] = {
             "panels": int(len(panels)),
@@ -320,25 +321,6 @@ def predict_2d_resources_many(
 
     from ghost_backend.execution.options import current_options, execution_scope
     settings = current_options()
-    if settings is not None and settings['factorization'] == 'adaptive':
-        from ghost_backend.geometry.io import parse_geometry, build_geometry_snapshot
-        from ghost_backend.execution.selection import select_backend
-        from ghost_backend.twod.preparation import preparation_scope
-        path = Path(geometry_path)
-        title, segments, ibcs, dielectrics = parse_geometry(path.read_text())
-        snapshot = build_geometry_snapshot(title, segments, ibcs, dielectrics)
-        with preparation_scope():
-            selection = select_backend(dict(geometry_snapshot=snapshot, material_base_dir=str(path.parent),
-                geometry_units=geometry_units, frequencies_ghz=list(frequencies_ghz), elevations_deg=[0.]*n_angles,
-                solver_method=solver_method, max_panels=max_panels,
-                mesh_convergence_policy={'fine_factor': fine_factor}), settings, certified=fine_factor > 1)
-            with execution_scope(dict(settings, factorization=selection['selected'])):
-                result = predict_2d_resources_many(geometry_path, frequencies_ghz, polarizations, geometry_units,
-                    max_panels, fine_factor, n_angles, safety, floor_gb, progress, solver_method)
-        for record in result.values():
-            record['backend_selection'] = selection
-        return result
-
     import ghost_backend.twod.solver as rcs_solver
     from ghost_backend.geometry.io import parse_geometry, build_geometry_snapshot
     from ghost_backend.runs.quality import scale_snapshot_panel_density
@@ -430,32 +412,17 @@ def predict_2d_resources_many(
                 raise RuntimeError(
                     "base/fine resource planning selected different formulations"
                 )
-            dense_gb = rcs_solver._estimate_memory_gb(
-                fine["nodes"],
-                use_cfie=False,
-                n_regions=max(1, fine["n_regions"]),
-                system_dofs=fine["system_dofs"],
-                operator_matrices=fine["operator_matrices"],
-                dense_resources=fine,
-                n_rhs=max(1, int(n_angles)),
-                solver_method=solver_method, formulation=fine["formulation"],
-            )
-            memory_estimate = None
-            if 'memory_estimate' in fine:
-                from ghost_backend.compressed.memory import forecast
-                from ghost_backend.compressed.runtime import storage_budget
-                from ghost_backend.execution.cpu import configured_batch_size
-                from ghost_backend.twod.operators import get_assembly_threads
-                memory_estimate = forecast(fine['nodes'], fine['system_dofs'], max(1,int(n_angles)),
-                    min(configured_batch_size(),max(1,int(n_angles))), get_assembly_threads(),
-                    storage_budget(), fine, float(safety), float(floor_gb))
-                base_estimate = forecast(base['nodes'], base['system_dofs'], max(1,int(n_angles)),
-                    min(configured_batch_size(),max(1,int(n_angles))), get_assembly_threads(),
-                    storage_budget(), base, float(safety), float(floor_gb))
-                mesh_peaks = dict(base=base_estimate['peak_bytes'], fine=memory_estimate['peak_bytes'])
-                if base_estimate['peak_bytes'] > memory_estimate['peak_bytes']:
-                    memory_estimate = base_estimate
-                memory_estimate['certification_mesh_peak_bytes'] = mesh_peaks
+            modes = ('dense', 'compressed') if settings is not None and settings['factorization'] == 'adaptive' else (None,)
+            estimates = {}
+            for mode in modes:
+                if mode is None:
+                    estimates[mode] = _mesh_peak_estimates(rcs_solver, base, fine, n_angles,
+                                                         solver_method, safety, floor_gb)
+                else:
+                    with execution_scope(dict(settings, factorization=mode)):
+                        estimates[mode] = _mesh_peak_estimates(rcs_solver, base, fine, n_angles,
+                                                             solver_method, safety, floor_gb)
+            peak_gb, memory_estimate = max(estimates.values(), key=lambda value: value[0])
             planned[(freq_ghz, requested_pol)] = {
                 "nodes": int(base["nodes"]),
                 "panels": int(base["panels"]),
@@ -470,14 +437,49 @@ def predict_2d_resources_many(
 
                 "system_dofs": int(fine["system_dofs"]),
                 "operator_matrices": int(fine["operator_matrices"]),
-                "peak_gb": (memory_estimate['peak_bytes']/1024**3 if memory_estimate is not None
-                            else float(floor_gb) + float(safety) * float(dense_gb)),
+                "peak_gb": peak_gb,
             }
             if memory_estimate is not None:
                 planned[(freq_ghz, requested_pol)]['memory_estimate'] = memory_estimate
+            if modes[0] is not None:
+                planned[(freq_ghz, requested_pol)]['backend_candidates'] = {
+                    mode: dict(peak_gb=peak, memory_estimate=estimate)
+                    for mode, (peak, estimate) in estimates.items()
+                }
             if progress is not None:
                 progress(freq_ghz, requested_pol)
     return planned
+
+
+def _mesh_peak_estimates(solver, base, fine, n_angles, method, safety, floor):
+    """Bound both meshes without evaluating numerical coefficient tiles.
+
+    The compressed forecast reserves the configured retained-payload ceiling
+    plus structural inverse and workspace bounds. Actual solves still sample
+    and enforce their normal memory, storage and numerical-quality gates.
+    """
+    from ghost_backend.compressed.memory import forecast
+    from ghost_backend.compressed.runtime import storage_budget
+    from ghost_backend.execution.cpu import configured_batch_size
+    from ghost_backend.twod.operators import get_assembly_threads
+    results = []
+    for original in (base, fine):
+        resources = dict(original)
+        estimate = solver._estimate_memory_gb(resources['nodes'], False,
+            n_regions=max(1, resources['n_regions']), system_dofs=resources['system_dofs'],
+            operator_matrices=resources['operator_matrices'], dense_resources=resources,
+            n_rhs=max(1, int(n_angles)), solver_method=method, formulation=resources['formulation'])
+        memory = None
+        if 'memory_estimate' in resources:
+            memory = forecast(resources['nodes'], resources['system_dofs'], max(1, int(n_angles)),
+                min(configured_batch_size(), max(1, int(n_angles))), get_assembly_threads(),
+                storage_budget(), resources, float(safety), float(floor))
+        results.append((memory['peak_bytes']/1024**3 if memory else floor+safety*estimate, memory))
+    peak, memory = max(results, key=lambda value: value[0])
+    if memory is not None:
+        memory['certification_mesh_peak_bytes'] = dict(base=int(results[0][0]*1024**3),
+                                                     fine=int(results[1][0]*1024**3))
+    return peak, memory
 
 
 def predict_2d_resources(

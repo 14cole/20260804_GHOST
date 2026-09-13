@@ -24,6 +24,10 @@ the solver report include the choice, forecast, budget, and reason. Desktop
 checkpoints allow each frequency to choose independently; the preflight summary
 gives a conservative choice for the whole sweep. HPC planning and saved profiles
 also support `adaptive`.
+Local/HPC automatic batches additionally compare the predicted completion
+of dense, compressed and mixed schedules under the execution node's CPU and
+memory allocation. Their submission forecast builds meshes once and does not
+sample coefficient tiles. See [batch presets](RUN_PROFILES.md).
 
 ## Local material sizing
 

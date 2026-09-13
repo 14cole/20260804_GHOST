@@ -1,5 +1,75 @@
 # Saved 2D execution settings
 
+## HPC and local batch presets
+
+Both 2D sweep scripts now start with one solve choice:
+
+```python
+SOLVE_PRESET = "auto"             # auto | small | balanced | large
+ADVANCED_OVERRIDES = {}          # optional execution fields
+MAX_SOLVE_GB = None              # optional per-solve RAM admission limit
+```
+
+`small`, `balanced`, and `large` match the desktop geometry presets below.
+`auto` uses CPU streaming/double precision and targets **predicted batch
+completion time**. On the execution node it compares dense-first,
+compressed-first, and mixed schedules, using each frequency's forecast,
+allocated CPUs, worker ceiling, and schedulable RAM. A single solve can favor
+dense while a memory-constrained batch favors compressed to finish more units
+concurrently. Completed HPC outputs are excluded from that comparison and
+still verified before reuse. The low-level factorization value remains
+`adaptive`; the older factorization value `auto` still means hierarchical
+factorization with dense fallback. Batches of up to 12 pending units compare
+every dense/compressed combination (1,024 for ten units); larger shares use a
+bounded search over mixed schedules.
+
+This is a bounded scheduling heuristic, not a guarantee of the fastest result
+on every cluster. The initial relative cost model uses the existing mesh/DOF
+cost model and a 1.4 compressed/dense timing ratio, rounded from the measured
+airfoil comparison below. It does not run trial solves or model queue delays.
+The log reports the chosen counts and relative completion costs; each result
+records the node's selection and reason alongside the requested profile.
+
+Submission builds exact mesh dimensions for each frequency and certification
+mesh, sharing topology between polarizations. Compressed RAM forecasts use
+the retained-payload ceiling plus inverse and workspace allowances, without
+evaluating matrix tiles. These conservative forecasts can reserve more RAM
+than a sampled estimate. Actual solves retain storage sampling, memory gates,
+residual checks and mesh certification. Automatic batch choices are passed to
+workers, avoiding a second backend-selection mesh forecast in each solve.
+
+A local Windows/Python 3.12 profiling run on `airfoil.geo`, 1-10 GHz in 1 GHz
+steps, 181 angles and 1.5x certification refinement measured 290.3 seconds
+before this change, 15.4 seconds with the new compressed forecast, and 17.0
+seconds with both automatic candidates. All 20 channel mesh/DOF/formulation
+records matched; the new compressed RAM reservations bounded the previous
+sampled estimates. These are submission-planning measurements, not full-solve
+or cluster wall-time benchmarks.
+
+The same settings work inside a driver JSON `settings` object:
+
+```json
+{
+  "SOLVE_PRESET": "auto",
+  "ADVANCED_OVERRIDES": {"assembly_threads": 4, "blas_threads": 2},
+  "MAX_SOLVE_GB": 32
+}
+```
+
+Use `ADVANCED_OVERRIDES` for factorization, mesh strategy, compressed storage,
+thread counts, basis reuse, angle batching, and temporary-directory settings.
+Use `MAX_SOLVE_GB` for per-solve RAM and the existing node/worker settings for
+the allocation. Conflicting duplicate settings are rejected. Presets leave
+frequencies, angles, geometry units, accuracy and certification unchanged.
+
+Legacy JSON recipes with explicit kernel, precision or execution settings
+continue to use their recorded configuration. `SOLVE_PRESET="custom"` allows
+direct use of the older script aliases. Named presets resolve to a complete
+execution profile that is carried by the manifest and fresh worker processes;
+ambient environment variables do not replace those explicit settings.
+
+## Desktop presets
+
 The GHOST solver tab shows Geometry Source, solver, solver units, a geometry
 preset, frequency and azimuth inputs, scattering mode, the geometry/setup check,
 and output controls. Geometry Source selects a .geo file or the current Geometry
@@ -36,12 +106,13 @@ not silently reapply a preset. Existing saved profiles remain valid. Presets are
 available for **2D monostatic** solves; BoR and bistatic retain their supported
 controls in Advanced Settings.
 
-New 2D monostatic runs in the desktops and local/HPC drivers default to the
+New 2D monostatic runs in the desktops default to the
 large-sweep preset: compressed assembly, CPU streaming kernels, double precision,
 8192 MiB compressed storage, four assembly threads, two BLAS threads, automatic
 sweep basis reuse, and 256 angles per batch. Thread defaults are reduced on hosts
 with fewer CPUs. RAM uses current available memory, temporary files use the
 execution host's system temporary directory, and mesh certification stays enabled.
+Local/HPC scripts default to the automatic batch preset described above.
 **Use efficient defaults** reapplies the resource preset to an existing setup.
 
 This preset prioritizes RAM for large sweeps. The measured 2 GHz airfoil

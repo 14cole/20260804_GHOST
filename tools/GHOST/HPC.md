@@ -21,9 +21,19 @@ cancelled, or is preempted cannot strand work.
 Every driver in the table shares `ghost_backend/hpc/scheduler.py`, so the tuning
 knobs below mean the same thing in each.
 
-For the opt-in 2D CPU streaming method, set `SOLVER_METHOD="experimental_cpu"`
-and `LU_PRECISION="double"`. See [CPU streaming (experimental)](EXPERIMENTAL_CPU.md)
-for supported geometries, memory behavior, saved setups and validation.
+The 2D scripts expose `SOLVE_PRESET="auto"`, with `small`, `balanced`, and
+`large` as explicit alternatives. Use `ADVANCED_OVERRIDES` for individual
+execution settings. Auto targets predicted batch completion time, including
+the number of simultaneous dense/compressed solves that fit the allocation.
+See [batch presets and compatibility](RUN_PROFILES.md).
+
+The `planned` messages happen before `sbatch`. Older compressed planning
+evaluated matrix tiles at every frequency, polarization and certification
+mesh to estimate compression. Submission now builds exact mesh dimensions
+and conservative storage bounds without coefficient sampling. Backend choices
+are made on the compute node using its allocation, then passed to workers.
+Actual solves retain the normal memory, storage, residual and certification
+checks. The log reports planning elapsed time separately from solve progress.
 
 ### Python environment and a driver in your own folder
 
@@ -312,10 +322,10 @@ sweep setting. The aliases are:
 | `VV` | `TE` | TE's in-plane E carries the vertical component |
 
 The 2-D output name is `<FREQ:.3f>GHz_<geometry_stem>.grim`; both channels are
-axes inside that artifact. The driver exposes no `POLARIZATIONS`,
-`SOLVER_METHOD`, or 2-D `CFIE_ALPHA` setting: the certified production path
-uses condition-reporting dense LU and the implemented 2-D formulations do not
-claim CFIE. The BoR drivers likewise co-solve VV and HH, then publish VV, HH,
+axes inside that artifact. The driver exposes no `POLARIZATIONS` or 2-D
+`CFIE_ALPHA` setting. The solve preset selects the kernel/factorization;
+the implemented 2-D formulations do not claim CFIE. The BoR drivers likewise
+co-solve VV and HH, then publish VV, HH,
 and the derived radar-frame VH channel in the final monostatic body file.
 
 ---
@@ -461,12 +471,12 @@ differ by two orders of magnitude.
 ### Threads
 
 ```python
-BLAS_THREADS_PER_WORKER = 1
-ASSEMBLY_THREADS        = "auto"
+ADVANCED_OVERRIDES = {"blas_threads": 1, "assembly_threads": "auto"}
 ```
 
-Leave both alone for normal sweeps. One process per admitted unit with
-single-threaded BLAS is the right shape. `"auto"` chooses assembly threads for
+The named presets default to up to four assembly threads and two BLAS threads.
+The override above enables dynamic assembly allocation and single-threaded
+BLAS. `"auto"` chooses assembly threads for
 each unit from that unit's predicted memory concurrency. On a 96-core node, a
 70 GB unit that fits four at a time gets 24 assembly threads, while a 10 GB unit
 that fits 31 at a time gets 3. The dispatcher reserves those CPU counts along
@@ -1001,8 +1011,8 @@ to compare against; keep one outside the tree.
 
 - **Many geometries or frequencies:** leave everything at defaults, set
   `N_NODES` to what you can get, and let the planner and stealing do the work.
-- **A few large geometries:** set `ASSEMBLY_THREADS = "auto"` (the default) so
-  idle cores go into the assembly instead of sitting unused.
+- **A few large geometries:** try `ADVANCED_OVERRIDES = {"assembly_threads": "auto"}`
+  to assign otherwise idle cores to assembly; compare measured batch times.
 - **Sweeps that OOM-killed before:** stop capping `MAX_WORKERS_PER_NODE` and
   make sure `MEM_PER_NODE` is `"0"` or an explicit large value. If a single unit
   genuinely does not fit, the solver's own memory gate will say so with a

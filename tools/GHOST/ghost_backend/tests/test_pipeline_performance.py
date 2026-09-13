@@ -190,7 +190,7 @@ class PipelinePerformanceTests(unittest.TestCase):
             after=input_identity(kw,{},'double',True)
             self.assertNotEqual(before,after)
 
-    def test_hpc_planner_supports_both_adaptive_routes(self):
+    def test_hpc_planner_defers_adaptive_choice_until_node_allocation(self):
         from ghost_backend.geometry.io import Segment, build_geometry_text
         from ghost_backend.hpc.scheduler import predict_2d_resources_many
         snapshot=fixture('pec',24)
@@ -200,13 +200,17 @@ class PipelinePerformanceTests(unittest.TestCase):
         text=build_geometry_text('Test',[Segment('PEC','2',seg['properties'],x,y)],[],[])
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'case.geo';path.write_text(text)
-            for budget,expected in ((10.,'dense'),(.001,'compressed')):
+            forecasts = []
+            for budget in (10., .001):
                 with execution_scope(dict(factorization='adaptive')):
-                    with mock.patch.object(solver,'_solve_memory_limit_gb',return_value=budget):
+                    with mock.patch.object(solver,'_solve_memory_limit_gb',return_value=budget) as memory:
                         plan=predict_2d_resources_many(str(path),[.6],['VV','HH'],'meters',10000,
                             fine_factor=1.5,n_angles=3,solver_method='experimental_cpu')
-                self.assertEqual({r['backend_selection']['selected'] for r in plan.values()},{expected})
+                memory.assert_not_called()
+                self.assertTrue(all(set(r['backend_candidates']) == {'dense', 'compressed'} for r in plan.values()))
                 self.assertTrue(all(r['peak_gb']>0 and r['fine_nodes']>r['nodes'] for r in plan.values()))
+                forecasts.append(plan)
+            self.assertEqual(forecasts[0], forecasts[1])
 
     def test_cancelled_sweep_reuses_only_completed_matching_frequencies(self):
         event=threading.Event()

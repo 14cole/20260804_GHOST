@@ -227,8 +227,10 @@ def configured_execution(function):
         selection = None
         requested_value = value
         if value['factorization'] == 'adaptive':
-            from ghost_backend.execution.selection import select_backend
-            selection = select_backend(bound.arguments, value, certified='certified' in function.__name__)
+            from ghost_backend.execution.selection import select_backend, current_batch_selection
+            selection = current_batch_selection()
+            if selection is None:
+                selection = select_backend(bound.arguments, value, certified='certified' in function.__name__)
             value = dict(value, factorization=selection['selected'])
         with execution_scope(value, limit_blas=requested is not None and inherited is None):
             result = function(*args, **kwargs)

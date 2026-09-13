@@ -50,7 +50,14 @@ def validate_settings(settings, allowed_keys):
     result = {}
     for key, value in settings.items():
         valid = False
-        if key == 'EXECUTION_OPTIONS':
+        if key == 'SOLVE_PRESET':
+            from ghost_backend.runs.presets import PRESETS
+            valid = value in PRESETS if isinstance(value, str) else False
+        elif key == 'ADVANCED_OVERRIDES':
+            from ghost_backend.runs.presets import validate_overrides
+            value = validate_overrides(value)
+            valid = True
+        elif key == 'EXECUTION_OPTIONS':
             from ghost_backend.execution.options import validate_options
             value = validate_options(value)
             valid = True
@@ -136,6 +143,9 @@ def configuration_payload(kind, settings, allowed_keys, *, run_setup=None):
         if merged[key] != checked[key]:
             raise ValueError(f'Driver setting {key} conflicts with the embedded run setup.')
     merged.update(checked)
+    if kind == '2d' and 'SOLVE_PRESET' in allowed_keys:
+        from ghost_backend.runs.presets import resolve_preset
+        merged = resolve_preset(merged)
     if (kind == '2d' and merged.get('LU_PRECISION') == 'mixed' and
             'SOLVER_METHOD' not in merged and 'SOLVER_METHOD' in allowed_keys):
         merged['SOLVER_METHOD'] = 'direct'

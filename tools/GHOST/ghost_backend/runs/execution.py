@@ -13,6 +13,14 @@ RESOURCE_KEYS = {'ASSEMBLY_THREADS': 'assembly_threads',
 
 
 def driver_options(namespace):
+    name = namespace.get('SOLVE_PRESET', 'custom')
+    if name != 'custom' and namespace.get('EXECUTION_OPTIONS') is None:
+        from ghost_backend.runs.presets import resolve_preset
+        inputs = dict(SOLVE_PRESET=name, ADVANCED_OVERRIDES=namespace.get('ADVANCED_OVERRIDES', {}))
+        if namespace.get('MAX_SOLVE_GB') is not None:
+            inputs['MAX_SOLVE_GB'] = namespace['MAX_SOLVE_GB']
+        resolved = resolve_preset(inputs)
+        return resolved['EXECUTION_OPTIONS']
     raw = namespace.get('EXECUTION_OPTIONS')
     if raw is None:
         defaults = efficient_defaults() if (namespace.get('SOLVER_METHOD') == 'experimental_cpu'
@@ -27,7 +35,9 @@ def driver_options(namespace):
 
 def reconcile_settings(settings):
     """Validate explicit profile/driver resource values and fill matching keys."""
-    checked = dict(settings)
+    from ghost_backend.runs.presets import resolve_preset
+    checked = (resolve_preset(settings) if 'SOLVE_PRESET' in settings or
+               'ADVANCED_OVERRIDES' in settings else dict(settings))
     if checked.get('EXECUTION_OPTIONS') is None:
         return checked
     profile = validate_for_run(checked['EXECUTION_OPTIONS'], checked.get('SOLVER_METHOD', 'direct'),
@@ -56,6 +66,13 @@ def driver_execution(function):
         if profile is None:
             profile = driver_options(namespace)
         previous = {key: namespace[key] for key in RESOURCE_KEYS}
+        if namespace.get('SOLVE_PRESET', 'custom') != 'custom':
+            from ghost_backend.execution.options import geometry_preset
+            name = namespace['SOLVE_PRESET']
+            recipe = geometry_preset('adaptive' if name in ('auto', 'automatic') else name)
+            for key, field in (('SOLVER_METHOD', 'solver_method'), ('LU_PRECISION', 'lu_precision')):
+                previous[key] = namespace[key]
+                namespace[key] = recipe[field]
         try:
             for key, field in RESOURCE_KEYS.items():
                 namespace[key] = profile[field]
@@ -83,8 +100,10 @@ def unit_execution(function):
             print('  {} | {}{} | {:.1f}s{}'.format(unit.get('name', unit.get('geometry', 'solve')),
                 event['phase'] + ': ' if event['phase'] else '', event['stage'],
                 event['elapsed_seconds'], memory), flush=True)
+        from ghost_backend.execution.selection import batch_selection_scope
         with execution_scope(profile, limit_blas=True,
-                             assembly_threads=context.get('execution_assembly_threads')):
+                             assembly_threads=context.get('execution_assembly_threads')), \
+                batch_selection_scope(context.get('batch_backend_selection')):
             with progress_listener(progress):
                 return function(unit, context, destination)
     return call
