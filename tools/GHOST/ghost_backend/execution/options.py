@@ -198,10 +198,7 @@ def execution_scope(value, limit_blas=False, assembly_threads=None):
             return
         import numpy
         import scipy.linalg
-        try:
-            from threadpoolctl import threadpool_limits
-        except ImportError:
-            raise RuntimeError('Install the project dependencies: threadpoolctl is required for saved BLAS thread limits.')
+        from ghost_backend.execution.thread_control import threadpool_limits
         with _BLAS_LOCK:
             with threadpool_limits(limits=checked['blas_threads'], user_api='blas'):
                 yield checked

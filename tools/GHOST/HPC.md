@@ -1018,5 +1018,8 @@ GHOST saves validated factorization/resource profiles. Local/HPC driver
 configurations carry these settings into 2D requests and manifests. Workers apply the captured settings independently of
 their launch environment. See [run profiles](RUN_PROFILES.md) for JSON examples,
 temporary directory portability, CPU reservations, and performance checks.
-Install the updated HPC requirements, including `threadpoolctl==2.2.0` for the
-Python 3.6 stack, and run `ghost_backend/hpc/check_environment.py` before submitting.
+Install the HPC requirements and copy the complete backend, including
+`execution/thread_control/`. Threadpoolctl 2.2.0 and its license are bundled
+for Python 3.6-3.8; newer Python uses the bundled 3.6.0 implementation.
+No separate threadpoolctl installation is needed. Run
+`ghost_backend/hpc/check_environment.py` before submitting.

@@ -982,7 +982,7 @@ class SolverTab(RunSetupMixin, QWidget):
         advanced_form.addRow("Mesh Certification", self.chk_mesh_certification)
         self.chk_frequency_checkpoints = QCheckBox('Keep completed frequencies and resume matching runs')
         self.chk_frequency_checkpoints.setChecked(True)
-        self.chk_frequency_checkpoints.setToolTip('2D monostatic results are saved in the application cache after each frequency. Changed inputs, material files, settings or solver source require recomputation.')
+        self.chk_frequency_checkpoints.setToolTip('Save completed 2D monostatic frequency results to disk and reuse matching results after restart. An interrupted frequency starts over; matrices and factors are not saved. Changed inputs, material files, settings or solver source require recomputation.')
         advanced_form.addRow('Frequency checkpoints', self.chk_frequency_checkpoints)
         advanced_form.addRow("Quality Thresholds", quality_threshold_row)
         self.advanced_settings_widget.setVisible(False)

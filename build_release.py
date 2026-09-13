@@ -124,6 +124,8 @@ REQUIRED_FILES = (
     "tools/GHOST/ghost_backend/bor/native/build_kernel.py",
     "tools/GHOST/ghost_backend/bor/native/bor_stream_kernel.c",
     "tools/GHOST/ghost_backend/execution/DATACLASSES_LICENSE.txt",
+    "tools/GHOST/ghost_backend/execution/thread_control/LICENSE-3.6.0.txt",
+    "tools/GHOST/ghost_backend/execution/thread_control/LICENSE-2.2.0.txt",
     "tools/GHOST/THIRD_PARTY.md",
     "tools/GHOST/BACKEND.md",
     "tools/GHOST/IMPORTS.md",

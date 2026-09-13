@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import shutil
 import sys
 from pathlib import Path
 import tempfile
@@ -42,6 +43,10 @@ class GrimDiagnosticsTests(unittest.TestCase):
             (ghost / relative).write_text("# sentinel\n", encoding="utf-8")
         for relative in diagnostics.FREDDY_SENTINELS:
             (freddy / relative).write_text("# sentinel\n", encoding="utf-8")
+        bundled = Path(diagnostics.__file__).resolve().parents[2] / "tools/GHOST/ghost_backend/execution/thread_control"
+        for path in bundled.iterdir():
+            if path.is_file():
+                shutil.copy2(path, ghost / "execution/thread_control" / path.name)
         return grim, ghost, freddy
 
     @staticmethod
@@ -51,7 +56,6 @@ class GrimDiagnosticsTests(unittest.TestCase):
             "PySide6.QtWidgets": "6.8.0",
             "matplotlib.backends.backend_qtagg": "3.10.0",
             "scipy": "1.15.0",
-            "threadpoolctl": "3.6.0",
         }
         return diagnostics.DependencyProbe(True, versions[module_name])
 
@@ -118,6 +122,29 @@ class GrimDiagnosticsTests(unittest.TestCase):
         ready, limitations = diagnostics.native_acceleration_status([])
         self.assertFalse(ready)
         self.assertEqual(len(limitations), 1)
+
+    def test_bundled_thread_control_needs_no_installed_distribution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            grim, ghost, _freddy = self._make_tree(root)
+            with mock.patch.object(diagnostics.metadata, "version", side_effect=AssertionError("No site lookup")):
+                result = next(row for row in self._collect(root, grim) if row.key == "threadpoolctl")
+        self.assertEqual(result.status, "PASS")
+        self.assertIn("bundled threadpoolctl 3.6.0", result.summary)
+        self.assertIn(str(ghost), result.details[0])
+        self.assertFalse(any(name.startswith("_grim_thread_control_") for name in sys.modules))
+
+    def test_incomplete_bundled_thread_control_has_copy_repair_message(self) -> None:
+        for filename in ("_threadpoolctl.py", "LICENSE-3.6.0.txt"):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                grim, ghost, _freddy = self._make_tree(root)
+                (ghost / "execution/thread_control" / filename).unlink()
+                results = self._collect(root, grim)
+                result = next(row for row in results if row.key == "threadpoolctl")
+                self.assertEqual(result.status, "FAIL")
+                self.assertIn("Restore the complete", " ".join(result.details))
+                self.assertEqual(diagnostics.startup_exit_code(results), 1)
 
     def test_missing_required_ghost_sentinel_returns_nonzero(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -243,6 +243,14 @@ class ReleaseBuilderTests(unittest.TestCase):
 
         self.assertFalse(output.exists())
 
+    def test_missing_bundled_thread_control_license_fails_before_output(self) -> None:
+        missing = self.source / "tools/GHOST/ghost_backend/execution/thread_control/LICENSE-3.6.0.txt"
+        missing.unlink()
+        output = self.root / "must-not-exist"
+        with self.assertRaisesRegex(build_release.ReleaseBuildError, "LICENSE-3.6.0.txt"):
+            self.build(output)
+        self.assertFalse(output.exists())
+
     def test_missing_feature_workflow_module_fails_before_output(self) -> None:
         missing = (
             self.source

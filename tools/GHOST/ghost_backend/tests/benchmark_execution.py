@@ -25,7 +25,7 @@ def worker(args):
         raise RuntimeError('Imported solver does not belong to the requested backend.')
     import numpy as np
     import scipy
-    from threadpoolctl import threadpool_limits, threadpool_info
+    from ghost_backend.execution.thread_control import threadpool_limits, threadpool_info
     from test_experimental_cpu import fixture, fields
     from ghost_backend.execution.options import validate_options
     profile = validate_options(dict(factorization=args.mode, blas_threads=args.blas_threads,

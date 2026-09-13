@@ -84,6 +84,8 @@ The solver supports the tested Python 3.6 HPC stack, except the desktop modules
 under `ui/`. Native BoR source, builds, and libraries live in `bor/native/`.
 The dataclasses fallback and its license live in `execution/`; see the top-level
 [third-party guide](THIRD_PARTY.md).
+Bundled BLAS thread controls and their licenses live in
+`execution/thread_control/` and require no separate package installation.
 
 Source fingerprints include package files under their relative paths. Moving
 or editing an implementation changes the recorded source identity; resume and

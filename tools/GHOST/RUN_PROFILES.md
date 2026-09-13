@@ -71,6 +71,31 @@ Selecting compressed assembly sets the compatible kernel and precision choices.
 Resource controls are disabled during a running job. These saved resource
 profiles apply to 2D; BoR retains its own modal and worker settings.
 
+## Choosing resource settings
+
+The large-geometry starting point is **8192 MiB compressed storage, 4 assembly
+threads, 2 BLAS threads, global mesh sizing, automatic sweep basis reuse,
+256 angles per batch, and frequency checkpoints enabled**. Thread counts are
+reduced on small CPU hosts. Total RAM requirements must still fit the machine.
+
+| Setting | Options and purpose | Time and RAM tradeoff |
+| --- | --- | --- |
+| Compressed storage cap | Numeric allowance in MiB for the retained compressed operator and inverse, including reserved partner-polarization data. 8192 MiB is 8 GiB. Active for compressed assembly and RAM-aware selection. | The cap does not preallocate RAM, change mesh accuracy, or limit total process memory. Lowering it can cause a storage-cap failure; it does not force tighter compression. Raising it allows larger representations but does not inherently make a solve faster. Workspaces, mesh data, threads, and outputs need additional RAM. |
+| RAM budget per solve | Available memory, or a specified GiB admission budget. The check also limits admission to 90% of currently available memory. | Use this for total estimated solve RAM. It rejects a run forecast to exceed the budget; it is not an operating-system allocation limit. |
+| Assembly threads | Auto or a positive integer. These workers evaluate geometry interactions and build matrix tiles. Auto follows a batch worker's allocation; desktop Auto uses one thread. | Start at 4, or 1-2 on a smaller machine. More workers can speed assembly, but their workspaces use RAM and they may compete for memory bandwidth. |
+| BLAS threads per solve | Positive integer controlling native matrix operations such as factorization and matrix products. GHOST applies the bundled controller during the solve and restores prior limits afterward. | Start at 2. One minimizes thread contention; additional threads can help large dense factorizations. The best value depends on the CPU and matrix size. Assembly and BLAS parallelism can overlap, so high values in both controls can be slower. |
+| Mesh sizing | Global material wavelength or Local material sizing (experimental). Global uses the shortest relevant material wavelength throughout wavelength-sized segments. Local can use larger panels on less demanding segments while retaining global sizing at corners, ends, junctions, and nearby boundaries. Explicit panel-count segments retain their counts. | Global is the default. Local can reduce unknowns, assembly time, and matrix storage for separated mixed-material geometries. All-PEC geometries have little material-wavelength benefit. Keep mesh certification enabled; a failed local convergence check retries global sizing and can increase completion time. |
+| Sweep basis reuse | Automatic, Disabled, or Enabled. The solver can solve a smaller independent set of incident fields and reconstruct the requested angular results. | Automatic avoids this overhead on small systems. Enabled attempts reuse more broadly but retains savings and numerical checks; unsuitable batches fall back to ordinary solves. Disabled solves every requested right-hand side. Reuse is most useful for many related azimuths, retains a bounded basis in RAM, and does not skip output angles. |
+| Angles per batch | Integer from 1 to 256. Limits the number of physical incident-angle right-hand sides handled together. | Start at 256 for long sweeps. Try 64 or 128 to reduce angular workspace RAM if needed. Smaller batches can add overhead and reduce basis-reuse opportunities; the frequency's matrix/factor is reused across batches. This changes working memory, not angle spacing or the total requested angles. |
+| Keep completed frequencies and resume matching runs | Enabled or disabled; enabled by default for desktop 2D monostatic runs. Each completed frequency is saved to the application cache on disk and verified before reuse. | Leave enabled for expensive sweeps. It avoids recomputing completed matching frequencies after cancellation or restart, with disk-space and read/write overhead. It saves results and metadata, not assembled matrices or factors. An interrupted frequency restarts from its beginning; a single-frequency run has no partial-frequency recovery. |
+
+Frequency checkpoints require matching geometry, angle selections, material
+file contents, execution settings, precision, certification settings, and
+solver source. Changed inputs or corrupt checkpoints are recomputed. Survey
+and certified results are kept separate. Updating the bundled thread-control
+source also changes the solver identity, so checkpoints from before that
+update will not be reused. Cache files do not replace exporting the final result.
+
 For the supplied airfoil's 10 GHz, 0-360 by 1 degree qualification configuration,
 choose compressed assembly, 8192 MiB compressed storage, four assembly threads,
 two BLAS threads, and mesh certification. Leave RAM at Available memory or
@@ -147,9 +172,12 @@ active profile with different settings.
 BLAS settings are process-wide. Configured solve sections are serialized within
 one Python process to prevent competing native thread limits. Batch workers are
 separate processes and can still execute concurrently. Install the updated
-dependencies: desktop `threadpoolctl==3.6.0`; Python 3.6 HPC
-`threadpoolctl==2.2.0`. The HPC environment checker exercises native thread
-limiting and a complex LU solve without importing Qt.
+NumPy/SciPy dependencies; threadpoolctl itself is bundled under
+`ghost_backend/execution/thread_control/` with its licenses. Python 3.9 and
+newer use version 3.6.0; Python 3.6-3.8 use version 2.2.0. No separate
+threadpoolctl installation is needed. Copy the complete backend directory.
+The HPC environment checker exercises native thread limiting and a complex
+LU solve without importing Qt.
 
 ## Performance regression checks
 

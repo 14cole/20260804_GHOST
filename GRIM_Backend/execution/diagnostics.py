@@ -13,7 +13,7 @@ import argparse
 import ctypes
 from dataclasses import dataclass
 import importlib
-from importlib import machinery, metadata
+from importlib import machinery, metadata, util
 import os
 from pathlib import Path
 import platform
@@ -209,6 +209,9 @@ GHOST_MODULE_LOCATIONS = {
 }
 
 GHOST_SENTINELS = (
+    "execution/thread_control/__init__.py",
+    "execution/thread_control/_threadpoolctl.py",
+    "execution/thread_control/_threadpoolctl_py36.py",
     "bor/native/__init__.py",
     "bor/native/build_kernel.py",
     "assembly/create_feature_manifest.py",
@@ -545,6 +548,39 @@ def _meets_minimum(value: str, minimum: str) -> bool | None:
     return installed + (0,) * (width - len(installed)) >= required + (0,) * (
         width - len(required)
     )
+
+
+def _bundled_thread_control_result(backend: Path) -> DiagnosticResult:
+    """Import thread controls from the selected source tree without site packages."""
+    directory = backend / "execution" / "thread_control"
+    name = "_grim_thread_control_" + uuid.uuid4().hex
+    try:
+        for version in ("3.6.0", "2.2.0"):
+            if not (directory / f"LICENSE-{version}.txt").is_file():
+                raise FileNotFoundError(directory / f"LICENSE-{version}.txt")
+        spec = util.spec_from_file_location(name, directory / "__init__.py",
+                                           submodule_search_locations=[str(directory)])
+        module = util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        if not all(callable(getattr(module, member, None))
+                   for member in ("threadpool_limits", "threadpool_info")):
+            raise ImportError("Bundled thread-control API is incomplete.")
+        return DiagnosticResult(
+            "threadpoolctl", "BLAS thread control", "PASS", True,
+            f"bundled threadpoolctl {module.__version__}; no separate installation required",
+            (str(module.implementation.__file__),),
+        )
+    except Exception as exc:
+        return DiagnosticResult(
+            "threadpoolctl", "BLAS thread control", "FAIL", True,
+            "bundled thread control could not be loaded",
+            (f"{type(exc).__name__}: {exc}", f"Restore the complete {directory} folder."),
+        )
+    finally:
+        for key in tuple(sys.modules):
+            if key == name or key.startswith(name + "."):
+                sys.modules.pop(key, None)
 
 
 def _default_dependency_probe(module_name: str, distribution: str) -> DependencyProbe:
@@ -993,16 +1029,7 @@ def collect_diagnostics(
                 ),
                 probe=dep_probe,
             ),
-            _dependency_result(
-                key="threadpoolctl",
-                name="BLAS thread control",
-                module_name="threadpoolctl",
-                distribution="threadpoolctl",
-                minimum="3.6",
-                required=True,
-                purpose="applies the saved GHOST CPU thread limits",
-                probe=dep_probe,
-            ),
+            _bundled_thread_control_result(ghost_backend),
         )
     )
 

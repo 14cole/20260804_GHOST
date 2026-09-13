@@ -5,6 +5,12 @@ For the separate headless GHOST Python 3.6.8 HPC environment, use
 [cluster setup/test instructions](../tools/GHOST/HPC.md). That profile is not
 the desktop dependency lock described below.
 
+GHOST includes threadpoolctl and its licenses in
+`tools/GHOST/ghost_backend/execution/thread_control/`; it is not an external
+dependency or wheelhouse entry. Copy that directory with the project. When
+regenerating an older wheelhouse, use an empty destination because its prior
+threadpoolctl wheel is no longer part of the exact dependency lock.
+
 The supported internal release target is 64-bit CPython 3.12 on Windows. The
 exact reviewed dependency graph is in `constraints-windows-py312.txt`; do not
 upgrade one package in isolation. A source release never contacts a package

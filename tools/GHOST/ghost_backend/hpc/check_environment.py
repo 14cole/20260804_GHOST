@@ -20,12 +20,13 @@ def main():
     try:
         import numpy as np
         import scipy
-        import threadpoolctl
+        from ghost_backend.execution import thread_control
         from scipy.linalg import lu_factor, lu_solve
         import ghost_backend.execution.runtime as ghost_runtime
         print('NumPy: {}'.format(np.__version__))
         print('SciPy: {}'.format(scipy.__version__))
-        print('threadpoolctl: {}'.format(threadpoolctl.__version__))
+        print('Bundled threadpoolctl: {} ({})'.format(
+            thread_control.__version__, thread_control.implementation.__file__))
         for name, version, minimum in (
             ('NumPy', np.__version__, (1, 14, 3)),
             ('SciPy', scipy.__version__, (1, 0, 0)),
@@ -49,7 +50,7 @@ def main():
         from ghost_backend.execution.options import execution_scope
         with execution_scope({'blas_threads': 1}, limit_blas=True):
             result = lu_solve(lu_factor(matrix), rhs)
-            if any(row['num_threads'] != 1 for row in threadpoolctl.threadpool_info()
+            if any(row['num_threads'] != 1 for row in thread_control.threadpool_info()
                    if row['user_api'] == 'blas'):
                 raise RuntimeError('BLAS thread limit was not applied.')
         residual = float(np.max(np.abs(matrix @ result - rhs)))

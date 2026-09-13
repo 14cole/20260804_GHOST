@@ -113,7 +113,7 @@ class ExecutionOptionsTests(unittest.TestCase):
                 self.assertEqual(values, [mode]*4)
 
     def test_blas_limit_is_applied_and_restored_after_failure(self):
-        from threadpoolctl import threadpool_info
+        from ghost_backend.execution.thread_control import threadpool_info
         def counts():
             return {row['filepath']: row['num_threads'] for row in threadpool_info() if row['user_api'] == 'blas'}
         before = counts()

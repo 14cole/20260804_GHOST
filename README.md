@@ -190,6 +190,10 @@ All Windows launchers prefer this one repository-root `.venv`, then an active
 `VIRTUAL_ENV`, then a system Python. This keeps the integrated and standalone
 windows on the same dependency set.
 
+GHOST's BLAS thread-control script and licenses are included in
+`tools/GHOST/ghost_backend/execution/thread_control/`. No separate threadpoolctl
+installation is required; copy that entire directory with the updated backend.
+
 To export `.pptx` files on Windows, install the optional PowerPoint bridge and
 have desktop Microsoft PowerPoint available:
 
