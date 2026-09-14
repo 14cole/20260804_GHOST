@@ -13,6 +13,7 @@ import platform
 import statistics
 import uuid
 import time
+from ghost_backend.execution.runtime import unlink_if_exists
 
 MAX_BYTES=2*1024**2
 MAX_ENTRIES=128
@@ -128,5 +129,5 @@ def record(key,mode,seconds,metadata):
     except (OSError,ValueError):pass
     finally:
         if temporary is not None:
-            try:temporary.unlink(missing_ok=True)
+            try:unlink_if_exists(temporary)
             except OSError:pass

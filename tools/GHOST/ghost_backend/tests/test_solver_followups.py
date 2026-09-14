@@ -140,6 +140,40 @@ def test_unwritable_timing_cache_returns_after_one_attempt(tmp_path,monkeypatch)
     assert not list(tmp_path.glob('*.tmp'))
 
 
+@pytest.mark.parametrize('failure', [None, 'write', 'replace', 'cleanup'])
+def test_timing_cache_cleanup_with_legacy_unlink(tmp_path, monkeypatch, failure):
+    from ghost_backend.execution import timing_history as history
+    monkeypatch.setenv('GHOST_TIMING_CACHE_DIR', str(tmp_path))
+    valid = dict(quality_gate=dict(passed=True))
+    history.record('previous', 'dense', 1., valid)
+    previous = history.cache_path().read_bytes()
+    attempts = []
+
+    class LegacyPath(type(tmp_path)):
+        # Match Python 3.6's signature so newer keyword arguments fail here.
+        def unlink(self):
+            attempts.append(self)
+            if failure == 'cleanup':
+                raise PermissionError('temporary cleanup denied')
+            return super().unlink()
+
+    def denied(*args, **kwargs):
+        raise PermissionError('optional cache write denied')
+
+    monkeypatch.setattr(history, 'Path', LegacyPath)
+    if failure == 'write':
+        monkeypatch.setattr(history.json, 'dump', denied)
+    if failure in ('replace', 'cleanup'):
+        monkeypatch.setattr(history.os, 'replace', denied)
+    history.record('completed', 'dense', 2., valid)
+    assert len(attempts) == 1
+    if failure is None:
+        assert set(history.read()) == {'previous', 'completed'}
+    else:
+        assert history.cache_path().read_bytes() == previous
+    assert len(list(tmp_path.glob('*.tmp'))) == (1 if failure == 'cleanup' else 0)
+
+
 def test_one_frequency_reference_fallback_does_not_train_timings(tmp_path,monkeypatch):
     from ghost_backend.execution import timing_history as history
     monkeypatch.setenv('GHOST_TIMING_CACHE_DIR',str(tmp_path))

@@ -9,9 +9,9 @@ sys.path[:0]=[str(BACKEND.parent)]
 from ghost_backend.hpc.common import configure_driver,latest_run_dir,run_status
 
 
-@pytest.mark.parametrize('density,without_math_prod', [(24, False), (24, True),
+@pytest.mark.parametrize('density,legacy_runtime_api', [(24, False), (24, True),
                                                       (-1400, False), (-2800, False)])
-def test_default_automatic_request_reaches_fresh_headless_worker(tmp_path, density, without_math_prod):
+def test_default_automatic_request_reaches_fresh_headless_worker(tmp_path, density, legacy_runtime_api):
     geometry=tmp_path/'geometry';geometry.mkdir()
     empty=tmp_path/'empty';empty.mkdir()
     (geometry/'rectangle.geo').write_text(
@@ -32,9 +32,16 @@ def test_default_automatic_request_reaches_fresh_headless_worker(tmp_path, densi
         # Scope the legacy API to the planner; current SciPy itself needs prod.
         ('import math\nfrom types import SimpleNamespace\n'
          'import ghost_backend.runs.batch as batch\n'
-         'batch.math = SimpleNamespace(isfinite=math.isfinite)\n' if without_math_prod else ''))
+         'batch.math = SimpleNamespace(isfinite=math.isfinite)\n'
+         'from pathlib import Path\n'
+         'import ghost_backend.execution.timing_history as history\n'
+         'class LegacyPath(type(Path())):\n'
+         '    def unlink(self):\n'
+         '        return super().unlink()\n'
+         'history.Path = LegacyPath\n' if legacy_runtime_api else ''))
     env=dict(os.environ,PYTHONPATH=os.pathsep.join((str(tmp_path),str(BACKEND.parent))),
-             OPENBLAS_NUM_THREADS='1',OMP_NUM_THREADS='1',MKL_NUM_THREADS='1')
+             OPENBLAS_NUM_THREADS='1',OMP_NUM_THREADS='1',MKL_NUM_THREADS='1',
+             GHOST_TIMING_CACHE_DIR=str(tmp_path/'timings'))
     def run(arguments):
         p=subprocess.run([sys.executable,str(driver),*arguments],env=env,cwd=tmp_path,
                          capture_output=True,text=True,timeout=120)
@@ -65,3 +72,7 @@ def test_default_automatic_request_reaches_fresh_headless_worker(tmp_path, densi
             assert all(step['backend_selection']['admission_budget_gib'] <=
                        m['execution_memory_reservation_gib'] for step in m['adaptive_mesh']['steps'])
     assert sorted(degrees)==({24:[1,1],-1400:[1,3],-2800:[3,3]}[density])
+    timings=json.loads((tmp_path/'timings'/'timings-v1.json').read_text())
+    assert len(timings)==2
+    assert all(len(entry['dense'])==1 for entry in timings.values())
+    assert not list((tmp_path/'timings').glob('*.tmp'))
