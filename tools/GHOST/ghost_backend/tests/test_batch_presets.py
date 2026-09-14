@@ -1,8 +1,10 @@
 """Batch presets, fast planning, and throughput choices preserve solver contracts."""
 import json
+import math
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -22,6 +24,41 @@ def unit(name, dense_ram, compressed_ram, cost=10.):
 
 
 class BatchPresetTests(unittest.TestCase):
+    def test_backend_selection_without_math_prod(self):
+        # Emulate the legacy HPC math module without changing other modules.
+        legacy_math = SimpleNamespace(isfinite=math.isfinite)
+        options = validate_options(dict(assembly_threads=1, blas_threads=1))
+        cases = [
+            ([unit('small', 2, 1)], 'dense'),
+            ([unit(str(i), 7, 2) for i in range(4)], 'compressed'),
+            ([dict(unit='fmm', backend_candidates=dict(
+                dense=dict(peak_gb=2., cost=10.),
+                compressed=dict(peak_gb=1., cost=14.),
+                fmm=dict(peak_gb=1., cost=2.)))], 'fmm'),
+        ]
+        with mock.patch('ghost_backend.runs.batch.math', legacy_math), \
+                mock.patch('ghost_backend.execution.policy.native_fmm_available', return_value=True):
+            for records, expected in cases:
+                with self.subTest(expected=expected):
+                    choices, summary = select_batch_backends(records, 4, 4, 8, options)
+                    self.assertTrue(all(c['selected'] == expected for c in choices.values()))
+                    self.assertEqual(summary['search'], 'all_backend_combinations')
+
+    def test_backend_search_cap_and_fixed_choices(self):
+        options = validate_options(dict(assembly_threads=1, blas_threads=1))
+        for count, search in [(0, 'all_backend_combinations'),
+                              (12, 'all_backend_combinations'),
+                              (13, 'bounded_mixed_schedules')]:
+            with self.subTest(flexible_units=count):
+                records = [unit(str(i), 2, 1) for i in range(count)]
+                records.append(dict(unit='fixed', backend_candidates=dict(
+                    dense=dict(peak_gb=2., cost=10.))))
+                choices, summary = select_batch_backends(records, 1, 1, 8, options)
+                self.assertEqual(summary['search'], search)
+                self.assertEqual(len(choices), count + 1)
+                self.assertTrue(all(c['selected'] == 'dense' for c in choices.values()))
+                self.assertEqual(summary['selected_cost'], 10. * (count + 1))
+
     def test_presets_resolve_in_both_drivers_and_survive_json_roundtrip(self):
         for driver in ('run_hpc_monostatic.py', 'run_local_monostatic.py'):
             kind, keys = driver_contract(BACKEND / driver)

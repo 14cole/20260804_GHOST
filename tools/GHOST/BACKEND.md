@@ -80,8 +80,9 @@ Add the enclosing GHOST directory to `PYTHONPATH` for package imports. Command
 scripts run directly by filename. The package uses Python namespace-package
 discovery, so the root needs no `__init__.py` file.
 
-The solver supports the tested Python 3.6 HPC stack, except the desktop modules
-under `ui/`. Native BoR source, builds, and libraries live in `bor/native/`.
+The current solver requires Python 3.10 or newer; see [HPC.md](HPC.md) for the
+numerical dependencies and environment check. Python 3.6 qualification applies
+only to historical revisions. Native BoR source, builds, and libraries live in `bor/native/`.
 The dataclasses fallback and its license live in `execution/`; see the top-level
 [third-party guide](THIRD_PARTY.md).
 Bundled BLAS thread controls and their licenses live in

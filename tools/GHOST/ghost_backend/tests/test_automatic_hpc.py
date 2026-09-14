@@ -9,8 +9,9 @@ sys.path[:0]=[str(BACKEND.parent)]
 from ghost_backend.hpc.common import configure_driver,latest_run_dir,run_status
 
 
-@pytest.mark.parametrize('density', [24, -1400, -2800])
-def test_default_automatic_request_reaches_fresh_headless_worker(tmp_path, density):
+@pytest.mark.parametrize('density,without_math_prod', [(24, False), (24, True),
+                                                      (-1400, False), (-2800, False)])
+def test_default_automatic_request_reaches_fresh_headless_worker(tmp_path, density, without_math_prod):
     geometry=tmp_path/'geometry';geometry.mkdir()
     empty=tmp_path/'empty';empty.mkdir()
     (geometry/'rectangle.geo').write_text(
@@ -27,7 +28,11 @@ def test_default_automatic_request_reaches_fresh_headless_worker(tmp_path, densi
         '    def find_spec(self,fullname,path=None,target=None):\n'
         '        if fullname.split(".")[0] in ("PySide6","PySide2","PyQt5","PyQt6"):\n'
         '            raise RuntimeError("GUI imported into HPC worker")\n'
-        'sys.meta_path.insert(0,NoGui())\n')
+        'sys.meta_path.insert(0,NoGui())\n' +
+        # Scope the legacy API to the planner; current SciPy itself needs prod.
+        ('import math\nfrom types import SimpleNamespace\n'
+         'import ghost_backend.runs.batch as batch\n'
+         'batch.math = SimpleNamespace(isfinite=math.isfinite)\n' if without_math_prod else ''))
     env=dict(os.environ,PYTHONPATH=os.pathsep.join((str(tmp_path),str(BACKEND.parent))),
              OPENBLAS_NUM_THREADS='1',OMP_NUM_THREADS='1',MKL_NUM_THREADS='1')
     def run(arguments):

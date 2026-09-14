@@ -95,7 +95,13 @@ def select_batch_backends(records, cores, workers, budget_gb, options):
         for r in flexible[:len(flexible)*step//8]:
             choice[r['unit']] = memory_first[r['unit']]
         proposals.append(choice)
-    combinations=math.prod(len(allowed[r['unit']]) for r in flexible)
+    # Older HPC interpreters lack math.prod. Only count up to the search cap,
+    # so large sweeps also avoid constructing an unnecessary huge integer.
+    combinations=1
+    for r in flexible:
+        combinations*=len(allowed[r['unit']])
+        if combinations > 4096:
+            break
     exhaustive=combinations <= 4096
     if exhaustive:
         # Compare every combination only while the three-backend search fits
