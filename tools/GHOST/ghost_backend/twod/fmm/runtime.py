@@ -62,6 +62,10 @@ def native(mesh,infos,pol,k0,kind,obs_order=8,src_order=8):
         if np.any(oracle.pec_nodes):
             jumps=jumps.multiply((~oracle.pec_nodes)[:,None])
         a=FMMSystem(n,jumps)
+        # Closed PEC equations showed a benefit in qualification. Material
+        # interfaces, sheets, open contours and CFIE keep the established ILU.
+        a.spatial_coarse_eligible=bool(all(complex(i.robin_impedance)==0 for i in infos)
+                                      and np.all(np.bincount(f.ids,minlength=n)==2))
         pec=np.where(oracle.pec_nodes,ids,-1);robin=np.where(~oracle.pec_nodes,ids,-1)
         if np.any(pec>=0):a.add(f,'S',rows=pec)
         if np.any(robin>=0):

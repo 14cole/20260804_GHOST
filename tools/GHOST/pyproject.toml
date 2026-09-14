@@ -23,6 +23,7 @@ exclude = ["ghost_backend.tests*", "ghost_backend.*.tests*", "ghost_backend.vali
 namespaces = true
 
 [tool.setuptools.package-data]
+"ghost_backend.twod.assembly.native" = ["*.c"]
 "ghost_backend.twod.fmm.native" = ["*.json", "*.md", "*.f90"]
 "ghost_backend.twod.fmm.native.vendor" = ["LICENSE", "NOTICE", "AUTHORS", "*.json"]
 "ghost_backend.twod.fmm.native.vendor.common" = ["*.f"]

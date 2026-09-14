@@ -83,6 +83,20 @@ TEXT_SUFFIXES = frozenset(
         ".yml",
     }
 )
+
+# Reviewed upstream platform-dispatch identifiers are allowed only in these
+# exact source revisions. Product/branding terms remain prohibited everywhere.
+# Normalize line endings so a Git checkout's text conversion does not matter.
+REVIEWED_PLATFORM_DISPATCH = {
+    "tools/GHOST/ghost_backend/execution/thread_control/_threadpoolctl.py":
+        ("12fb9526b6a74d2e686b7ec148dc165c3587999b14fa86984aa180e10802400b", FORBIDDEN_RELEASE_TERMS[5:7]),
+    "tools/GHOST/ghost_backend/execution/thread_control/_threadpoolctl_py36.py":
+        ("a3bd8629e7300409b201ccd42d5ec4812ce1965f04b135169ac68e2de3260ebf", FORBIDDEN_RELEASE_TERMS[5:7]),
+    "tools/GHOST/ghost_backend/twod/fmm/kernel.py":
+        ("58cc77dcfa0c50972fa8f42e1e8d3d8a527db5edada980620b3039579d6b4a8c", FORBIDDEN_RELEASE_TERMS[6:7]),
+    "tools/GHOST/ghost_backend/twod/fmm/native/build.py":
+        ("9db555a8e60ccc17eb0cfda0d237290efb296a60c8240697c1590f2fd64552bd", FORBIDDEN_RELEASE_TERMS[6:7]),
+}
 TEXT_FILE_NAMES = frozenset(
     {".editorconfig", ".gitattributes", ".gitignore", "license", "makefile", "readme"}
 )
@@ -120,6 +134,8 @@ REQUIRED_FILES = (
     "tools/GHOST/Launch_GHOST_GUI.bat",
     "tools/GHOST/scripts/check_headless.py",
     "tools/GHOST/ghost_backend/twod/fmm/native/build.py",
+    "tools/GHOST/ghost_backend/twod/assembly/native/table.c",
+    "tools/GHOST/ghost_backend/twod/assembly/native/build.py",
     "tools/GHOST/ghost_backend/twod/fmm/native/plan.f90",
     "tools/GHOST/ghost_backend/twod/fmm/native/THIRD_PARTY.md",
     "tools/GHOST/ghost_backend/twod/fmm/native/vendor/LICENSE",
@@ -686,7 +702,12 @@ def _validate_forbidden_terms(source_root: Path, relative_files: Sequence[Path])
     }
 
     def inspect_text(label: str, text: str) -> None:
+        reviewed = REVIEWED_PLATFORM_DISPATCH.get(label)
+        digest = hashlib.sha256(text.replace('\r\n','\n').encode('utf-8')).hexdigest()
+        allowed = reviewed[1] if reviewed is not None and digest == reviewed[0] else ()
         for term, pattern in patterns.items():
+            if term in allowed:
+                continue
             match = pattern.search(text)
             if match is not None:
                 line = text.count("\n", 0, match.start()) + 1

@@ -93,7 +93,7 @@ def evaluate(points, k, charges=None, dipoles=None, normals=None, gradient=False
     if not 1e-14 <= eps <= 1e-3 or type(threads) is not int or threads < 1:
         raise ValueError('Invalid FMM tolerance or thread count.')
     if plan is not None and (complex(k) != plan.k or eps != plan.eps or
-                            not np.array_equal(points,plan.points)):
+                            points is not plan.points and not np.array_equal(points,plan.points)):
         raise ValueError('FMM plan must match the points, wavenumber and tolerance.')
     data = charges if charges is not None else dipoles
     if data is None:

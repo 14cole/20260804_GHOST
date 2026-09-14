@@ -11,7 +11,7 @@ from ghost_backend.twod.assembly.geometry_plan import AssemblyGeometry
 from ghost_backend.twod.fmm.kernel import evaluate, NativePlan
 
 
-def near_pairs(geometry, budget):
+def near_pairs(geometry, budget, count_only=False):
     """Enumerate geometric neighbours using length-binned spatial trees."""
     lengths, centers = geometry.lengths, geometry.centers
     bins = np.floor(np.log2(lengths / lengths.min())).astype(int)
@@ -33,8 +33,8 @@ def near_pairs(geometry, budget):
                 # All three primitives, accurate blocks, COO/CSR construction.
                 if count*2304 > budget:
                     raise MemoryError('FMM near interactions exceed the configured storage budget.')
-                pairs.extend((i,int(j)) for j in js)
-    return pairs
+                if not count_only:pairs.extend((i,int(j)) for j in js)
+    return count if count_only else pairs
 
 
 class GalerkinKernel:
@@ -54,6 +54,7 @@ class GalerkinKernel:
         self.phi=np.stack((1-t,t),axis=1)
         self.points=(g.p0[:,None]+t[None,:,None]*g.segments[:,None]).reshape(-1,2)
         self.native_plan=NativePlan(self.points,self.k,self.eps)
+        self.points=self.native_plan.points
         self.weights=(g.lengths[:,None]*w).ravel()
         self.normals=np.repeat(g.normals,self.order,axis=0)
         self.ids=g.node_ids.ravel()
@@ -144,8 +145,9 @@ class GalerkinKernel:
             if vector:x=x[:,None]
             local=(self.P@x).reshape(self.m,2,-1)
             if mask is not None:local*=np.asarray(mask)[:,None,None]
-            key=('S' if kind=='KP' else kind,local.shape,local.tobytes())
-            group=groups.get(key)
+            key=('S' if kind=='KP' else kind,local.shape)
+            candidates=groups.setdefault(key,[])
+            group=next((span for other,span in candidates if np.array_equal(other,local)),None)
             if group is None:
                 density=np.einsum('qa,ear->eqr',self.phi,local).reshape(len(self.points),-1)
                 strength=self.weights[:,None]*density
@@ -156,7 +158,7 @@ class GalerkinKernel:
                 count=strength.shape[1]
                 charges.append(np.zeros_like(strength) if kind=='K' else strength)
                 dipoles.append(strength if kind=='K' else np.zeros_like(strength))
-                group=(start,start+count);groups[key]=group;start+=count
+                group=(start,start+count);candidates.append((local,group));start+=count
             routes.append((kind,local,coefficient,group,vector))
         value,gradient=evaluate(self.points,self.k,np.column_stack(charges),
             dipoles=np.column_stack(dipoles) if has_dipole else None,normals=self.normals,

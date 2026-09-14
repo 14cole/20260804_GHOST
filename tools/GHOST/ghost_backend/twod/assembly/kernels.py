@@ -161,7 +161,8 @@ class KernelTable:
             co=Chebyshev.basis(j,domain=[0,1]).convert(kind=Polynomial).coef
             conversion[:len(co),j]=co
         power=np.einsum("pj,bjc->bpc",conversion,cheb)
-        power/=width[:,:,None]**np.arange(n)[None,:,None]
+        self.normalized_power=np.ascontiguousarray(power)
+        power=power/width[:,:,None]**np.arange(n)[None,:,None]
         self.polys=[PPoly(np.ascontiguousarray(power[:,:,c].T[::-1]),self.bounds,extrapolate=False) for c in (0,1)]
         rng=np.random.RandomState(557)
         test=np.r_[0.,1.,.5*(1+np.cos(np.pi*(np.arange(2*n+3)+.37)/(2*n+3))),rng.uniform(0,1,37)]
@@ -171,9 +172,24 @@ class KernelTable:
         tail=float(np.max(np.sum(np.abs(cheb[:,-3:]),axis=1)/np.maximum(np.min(np.abs(ref),axis=1),1e-280)))
         if not np.all(np.isfinite(got)) or max(error,tail)>tolerance:raise Rejected(f"Polynomial validation failed: error={error:g}, tail={tail:g}")
         self.joint = PPoly(np.stack([p.c for p in self.polys], axis=-1), self.bounds, extrapolate=False)
+        from ghost_backend.twod.assembly.native.table import evaluate
+        native=evaluate(self.bounds,self.normalized_power,rr)
+        self.native_checked=False
+        if native is not None:
+            native_error=float(np.max(abs(native-ref)/np.maximum(abs(ref),1e-280)))
+            self.native_checked=bool(np.all(np.isfinite(native)) and native_error <= tolerance)
         self.evidence=dict(k_real=k.real,k_imag=k.imag,degree=degree,intervals=len(bounds)-1,
-            bytes=sum(p.c.nbytes for p in self.polys)+self.joint.c.nbytes+self.bounds.nbytes,check_points=rr.size,
+            bytes=sum(p.c.nbytes for p in self.polys)+self.joint.c.nbytes+self.bounds.nbytes+self.normalized_power.nbytes,check_points=rr.size,
             max_check_relative=error,max_tail_relative=tail,tolerance=tolerance,build_seconds=time.perf_counter()-start)
+        self.evidence['evaluation_backend']='native_horner' if self.native_checked else 'scipy_ppoly'
+        if native is not None:self.evidence['native_check_relative']=native_error
+
+    def evaluate(self,distances,channel=-1):
+        if self.native_checked:
+            from ghost_backend.twod.assembly.native.table import evaluate
+            result=evaluate(self.bounds,self.normalized_power,distances,channel)
+            if result is not None:return result
+        return self.joint(distances) if channel == -1 else self.polys[channel](distances)
 
 
 def select_far_kernels(mesh, k, green, hankel, domain_upper=None):
@@ -240,14 +256,14 @@ def select_far_kernels(mesh, k, green, hankel, domain_upper=None):
 
     def evaluator(channel, original):
         def evaluate(k0, real_k, dist, kr, scratch, out):
-            out[:] = table.polys[channel](dist)
+            out[:] = table.evaluate(dist,channel)
             bad = ~np.isfinite(out)
             if np.any(bad):
                 exact_subset(original, k0, real_k, dist, out, bad)
         return evaluate
     fg, fh = evaluator(0, green), evaluator(1, hankel)
     def pair(k0, real_k, dist, kr, scratch, g, h):
-        values = table.joint(dist)
+        values = table.evaluate(dist)
         g[:], h[:] = values[..., 0], values[..., 1]
         bad = ~np.all(np.isfinite(values), axis=-1)
         if np.any(bad):

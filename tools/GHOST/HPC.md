@@ -53,6 +53,7 @@ a complete GNU Fortran toolchain:
 
 ```bash
 python tools/GHOST/ghost_backend/twod/fmm/native/build.py
+python tools/GHOST/ghost_backend/twod/assembly/native/build.py
 ```
 
 Set `FC` to the full compiler path if needed. Copy the complete matching
@@ -60,6 +61,20 @@ Set `FC` to the full compiler path if needed. Copy the complete matching
 worker platform. A Windows DLL cannot be used on Linux. For offline installation,
 obtain wheels matching the cluster's operating system, architecture, and Python
 version, then use `--no-index --find-links /path/to/wheels`.
+
+The second build uses `CC` (default `gcc`) for the optional C99 kernel-table
+evaluator. It accelerates validated lossy-material interpolation and falls back
+to SciPy when unavailable. Each table must pass its numerical checks before
+the evaluator is used. Build on the cluster platform before starting workers.
+
+Automatic also uses repeated successful timings for identical requests on the
+same host. Source, materials, angles, numerical settings and CPU settings must
+match; at least two measurements of each of two backends are required to change
+a ranking. New nodes use the conservative work model. Worker reconsideration
+stays within the RAM reservation assigned by the batch scheduler. Timing history
+expires after 14 days, contains hashes and timings rather than fields, and can
+be stored on node-local scratch through `GHOST_TIMING_CACHE_DIR`. An unwritable
+history directory leaves the ordinary planner available.
 
 The retained `requirements/hpc-py36.txt` is a historical profile for the older
 solver revision. It does not qualify Python 3.6 for this update. See

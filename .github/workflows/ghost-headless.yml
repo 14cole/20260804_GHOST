@@ -20,4 +20,5 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y gfortran
       - run: python -m pip install -e './tools/GHOST[test]'
       - run: python -m ghost_backend.twod.fmm.native.build
+      - run: python -m ghost_backend.twod.assembly.native.build
       - run: python tools/GHOST/scripts/check_headless.py

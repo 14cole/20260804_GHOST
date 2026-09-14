@@ -110,6 +110,7 @@ class FMMTests(unittest.TestCase):
                 self.assertTrue(b['metadata']['fmm_factors'])
                 for event in b['metadata']['fmm_factors']:
                     self.assertFalse(event['dense_matrix_built'])
+                    self.assertEqual(event['spatial_coarse_eligible'],kind=='pec')
                     self.assertLessEqual(event['max_relative_residual'],1e-9)
 
     def test_iteration_failure_and_storage_rejection(self):
@@ -134,6 +135,7 @@ class FMMTests(unittest.TestCase):
             expected=pec_cylinder_backscatter_amplitude(.06,freq*1e9,'TM')
             self.assertLess(abs(value-expected)/abs(expected),2e-3)
             self.assertEqual(result['metadata']['fmm_factors'][0]['representation'],'combined_field_pec')
+            self.assertFalse(result['metadata']['fmm_factors'][0]['spatial_coarse_eligible'])
 
     def test_certified_path_and_frequency_cache_lifetime(self):
         result=rcs.solve_monostatic_rcs_2d_certified(fixture('pec',32),[.6,.8],[0.],
@@ -150,6 +152,7 @@ class FMMTests(unittest.TestCase):
             args=(snapshot,[1.],[30.,60.,90.])
             a=rcs.solve_monostatic_rcs_2d(*args,geometry_units='meters')
             b=rcs.solve_monostatic_rcs_2d(*args,geometry_units='meters',solver_method='fmm')
+            self.assertTrue(all(not e['spatial_coarse_eligible'] for e in b['metadata']['fmm_factors']))
             for pol in ('VV','HH'):
                 self.assertLess(np.max(abs(fields(a,pol)-fields(b,pol)))/np.max(abs(fields(a,pol))),3e-8)
 

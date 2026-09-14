@@ -34,6 +34,27 @@ def current_session():
     return _SESSION.get()
 
 
+def reusable_dense_bytes(mesh, infos, polarization, formulation, dofs):
+    """Credit only the owned matrix the next polarization will reuse.
+
+    A matching shape alone is insufficient: geometry, materials, frequency,
+    formulation and quadrature must match the assembly session key.
+    """
+    import numpy as np
+    from ghost_backend.linalg.hierarchical import factor_mode
+    session=current_session()
+    if factor_mode()!='dense' or polarization!='TM' or session is None or session.pending is None:
+        return 0
+    kind={'robin':'robin','single_dielectric':'dielectric','multi_region':'multi_region'}.get(formulation)
+    if kind is None:return 0
+    key,value=session.pending
+    if key!=system_key(mesh,infos,kind,8,8):return 0
+    matrix=value[0]
+    if (not isinstance(matrix,np.ndarray) or matrix.dtype!=np.complex128 or
+        matrix.shape!=(dofs,dofs) or not matrix.flags.owndata):return 0
+    return matrix.nbytes
+
+
 def shared_assembly(function):
     signature = inspect.signature(function)
     @wraps(function)

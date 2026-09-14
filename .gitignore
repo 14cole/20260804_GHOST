@@ -29,3 +29,5 @@ results/
 **/ghost_backend/twod/fmm/native/*.dll
 **/ghost_backend/twod/fmm/native/*.so
 **/ghost_backend/twod/fmm/native/*.dylib
+**/ghost_backend/twod/assembly/native/*.dll
+**/ghost_backend/twod/assembly/native/*.so

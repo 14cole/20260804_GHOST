@@ -135,6 +135,7 @@ def storage_resources(mesh, layout):
 
 
     return dict(operator_matrices=matrices, operator_entries=entries,
+                geometric_near_pairs=near_pairs,
                 assembly_operator_entries=0,
                 operator_map_bytes=map_bytes, mass_workspace_bytes=mass_bytes,
                 block_workspace_bytes=block_bytes,

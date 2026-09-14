@@ -437,6 +437,17 @@ class ReleaseBuilderTests(unittest.TestCase):
                 (Path("release-note.txt"),),
             )
 
+    def test_reviewed_platform_dispatch_requires_exact_content(self) -> None:
+        for name in build_release.REVIEWED_PLATFORM_DISPATCH:
+            original=(REPOSITORY_ROOT/name).read_text(encoding='utf-8')
+            path=self.source/name
+            path.parent.mkdir(parents=True,exist_ok=True)
+            path.write_text(original,encoding='utf-8',newline='\n')
+            build_release._validate_forbidden_terms(self.source,(Path(name),))
+            path.write_text(original+'\n# changed\n',encoding='utf-8')
+            with self.assertRaises(build_release.ReleaseBuildError):
+                build_release._validate_forbidden_terms(self.source,(Path(name),))
+
     def test_forbidden_term_gate_inspects_powerpoint_xml(self) -> None:
         path = self.source / "slides.pptx"
         with zipfile.ZipFile(path, "w") as package:

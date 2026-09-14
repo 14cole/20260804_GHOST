@@ -1200,14 +1200,16 @@ def _detect_available_gb() -> 'float':
 _MEMORY_LIMIT_FRACTION = 0.9
 
 
-def _solve_memory_limit_gb() -> 'float':
+def _solve_memory_limit_gb(resident_gb=0.0) -> 'float':
     from ghost_backend.execution.options import allocated_memory_budget
-    limit=_configured_solve_memory_limit_gb()
+    limit=_configured_solve_memory_limit_gb(resident_gb)
     allocation=allocated_memory_budget()
     return min(limit,allocation) if allocation is not None else limit
 
 
-def _configured_solve_memory_limit_gb() -> 'float':
+def _configured_solve_memory_limit_gb(resident_gb=0.0) -> 'float':
+    if not math.isfinite(resident_gb) or resident_gb<0:
+        raise ValueError('Resident matrix credit must be finite and nonnegative.')
     override = environment_value("GHOST_MAX_SOLVE_GB", "").strip()
     if override:
         try:
@@ -1216,9 +1218,9 @@ def _configured_solve_memory_limit_gb() -> 'float':
             value = 0.0
         if math.isfinite(value) and value > 0.0:
             available = _detect_available_gb() if current_options() is not None else 0.0
-            return min(value, _MEMORY_LIMIT_FRACTION * available) if available > 0 else value
+            return min(value, _MEMORY_LIMIT_FRACTION * available + resident_gb) if available > 0 else value
     detected = _detect_available_gb()
-    return _MEMORY_LIMIT_FRACTION * detected if detected > 0.0 else 0.0
+    return _MEMORY_LIMIT_FRACTION * detected + resident_gb if detected > 0.0 else 0.0
 
 
 def _memory_gate_message(
@@ -1288,8 +1290,9 @@ def _estimate_memory_gb(
         # Conservative linear workspace allowance, plus the explicit near cap.
         # Near assembly checks actual pair counts before allocating its matrices.
         batch=min(batch,32)
-        peak=storage_budget()+16*d*(4*batch+option('fmm_restart',80)+2*option('fmm_recycle_vectors',12)+20)+32768*n*max(1,n_regions)+128*1024**2
-        plan=dict(method='fmm_workspace_allowance',peak_bytes=peak,unknowns=d,dense_matrix_bytes=0)
+        from ghost_backend.twod.fmm.memory import forecast
+        plan=forecast(n,d,n_regions,batch,storage_budget(),resources)
+        peak=plan['peak_bytes']
         if dense_resources is not None:dense_resources['memory_estimate']=plan
         return peak/1024**3
     if factorization == 'compressed':
@@ -1685,12 +1688,23 @@ def _dense_formulation_resources(
 
     result = {
         "nodes": nnodes,
+        "panels": len(mesh.elements),
         "n_regions": int(len(regions)),
         "formulation": formulation,
         "system_dofs": int(system_dofs),
         "operator_matrices": int(operator_matrices),
         **storage,
     }
+    longest=max((e.length for e in mesh.elements),default=0.)
+    wavenumbers={complex(getattr(i,'k_'+side)) for i in infos for side in ('minus','plus')
+                 if getattr(i,side+'_region')>=0}
+    result['fmm_kernel_orders']=[max(8,int(math.ceil(abs(k)*longest/2))+4)
+                                 for k in sorted(wavenumbers,key=lambda z:(z.real,z.imag))
+                                 if math.isfinite(abs(k))]
+    if 'geometric_near_pairs' not in result and mesh.elements:
+        from ghost_backend.twod.fmm.galerkin import near_pairs
+        from ghost_backend.twod.assembly.geometry_plan import AssemblyGeometry
+        result['geometric_near_pairs']=2*near_pairs(AssemblyGeometry(mesh),float('inf'),count_only=True)-len(mesh.elements)
     from ghost_backend.compressed.runtime import enabled as compressed_enabled
     if sample_compression and compressed_enabled() and not storage.get('analytic_zero'):
         from ghost_backend.compressed.memory import geometry_storage
@@ -2063,7 +2077,15 @@ def solve_monostatic_rcs_2d_single_polarization(
             n_rhs=max(1, len(elevations)),
             solver_method=solver_method, formulation=resources["formulation"],
         )
-        memory_limit_gb = _solve_memory_limit_gb()
+        from ghost_backend.twod.assembly.session import reusable_dense_bytes
+        resident_bytes=reusable_dense_bytes(mesh,coupled_infos,pol,resources['formulation'],resources['system_dofs'])
+        memory_limit_gb = _solve_memory_limit_gb(resident_bytes/1024**3) if resident_bytes else _solve_memory_limit_gb()
+        if resident_bytes:
+            from ghost_backend.execution.cpu import current_state
+            state=current_state()
+            if state is not None:
+                state.memory_estimates.append(dict(method='reused_dense_matrix_admission',
+                    resident_matrix_bytes=resident_bytes,total_peak_gib=est_gb,admission_limit_gib=memory_limit_gb))
         if est_gb > memory_limit_gb:
             raise MemoryError(
                 _memory_gate_message(

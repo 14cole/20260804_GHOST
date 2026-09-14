@@ -164,11 +164,10 @@ and certified results are kept separate. Updating the bundled thread-control
 source also changes the solver identity, so checkpoints from before that
 update will not be reused. Cache files do not replace exporting the final result.
 
-For the supplied airfoil's 10 GHz, 0-360 by 1 degree qualification configuration,
-choose compressed assembly, 8192 MiB compressed storage, four assembly threads,
-two BLAS threads, and mesh certification. Leave RAM at Available memory or
-enter an admission budget appropriate to the execution host. The 8192 MiB
-setting is a numeric payload allowance, not a prediction of process RAM.
+For the supplied airfoil, keep Automatic and mesh certification enabled.
+The backend selects an admitted dense, compressed, or FMM path for the execution
+host. Resource limits can reflect either a workstation or an HPC allocation.
+Compressed storage is a payload allowance, not a prediction of process RAM.
 
 The status text reports assembly, factorization, angle solving, and mesh
 certification work, with elapsed solve time and sampled process RAM. Base and
@@ -184,10 +183,8 @@ Public 2D solve entry points accept `execution_options`:
 ```python
 result = solver.solve_monostatic_rcs_2d_certified(
     snapshot, [10.0], list(range(361)), geometry_units="inches",
-    solver_method="experimental_cpu", max_panels=50000,
+    solver_method="auto", max_panels=100000,
     execution_options={
-        "factorization": "compressed",
-        "compressed_storage_mib": 8192,
         "assembly_threads": 4,
         "blas_threads": 2,
         "temporary_directory": "",
@@ -199,11 +196,8 @@ In a 2D driver's JSON `settings` object use:
 
 ```json
 {
-  "SOLVER_METHOD": "experimental_cpu",
-  "LU_PRECISION": "double",
-  "EXECUTION_OPTIONS": {
-    "factorization": "compressed",
-    "compressed_storage_mib": 8192,
+  "SOLVE_PRESET": "auto",
+  "ADVANCED_OVERRIDES": {
     "ram_budget_gib": null,
     "assembly_threads": "auto",
     "blas_threads": 2,
@@ -226,9 +220,9 @@ changing loaded controls or starting a solve. Absolute custom temporary paths
 must exist on the execution host; leaving the path empty is portable.
 
 Saved profiles and their versioned missing-field defaults remain reproducible.
-Low-level Python entry points retain their existing defaults; use
-`solver_method="experimental_cpu", execution_options=efficient_defaults()` to
-select this preset from `ghost_backend.execution.options`. Explicit reference
+New normal GUI and driver runs use Automatic. For Python integrations, request
+`solver_method="auto"` as shown above; legacy explicit presets remain supported.
+Explicit reference
 kernel or mixed-precision driver configurations continue to use compatible dense
 settings unless another supported profile is supplied.
 

@@ -71,6 +71,9 @@ size. A 20 GHz mesh study showed 8-14% field changes on refining 384 to 768 pane
 for difficult gap/material cases. Those meshes were not physically converged.
 Future benchmarks should use representative user geometries and converged
 meshes, with isolated wall-time/RAM measurements on the deployment workstation.
+The integrated [follow-up report](SOLVER_FOLLOWUPS.md) adds supplied-airfoil
+measurements, refinement evidence, material-kernel acceleration and updated
+workstation/HPC resource planning.
 
 ## Runtime and native setup
 
@@ -115,10 +118,11 @@ FMM library automatically.
 
 ## Remaining work
 
-Stronger preconditioning, measured calibration of the selector, tighter peak
-memory forecasts, reuse of translation operators and more native allocations,
+The follow-up update adds selective spatial coarse correction, exact-request
+timing evidence, itemized FMM memory allowances, fewer native routing copies,
+and normalization of NumPy angle-array inputs. Remaining work includes broader
+multilevel preconditioning and hardware calibration, further translation reuse,
 adaptive high-order methods for arbitrary corners/gaps, additional material
-couplings, and normalization of NumPy angle-array inputs remain future work.
-They were recommendations from the backend review, not implemented changes in
-this merge. The current solver should not be described as a fully qualified
-industrial solver across the entire 1-20 GHz and 10-20 ft geometry range.
+couplings, independent material-junction validation and real Linux/HPC runs.
+The current solver should not be described as a fully qualified industrial
+solver across the entire 1-20 GHz and 10-20 ft geometry range.

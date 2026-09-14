@@ -39,6 +39,7 @@ _ACTIVE = ScopedValue('ghost_execution_options', default=None)
 _ASSEMBLY_ALLOCATION = ScopedValue('ghost_assembly_allocation', default=None)
 _MEMORY_ALLOCATION = ScopedValue('ghost_memory_allocation', default=None)
 _BLAS_LOCK = threading.RLock()
+_PUBLIC_DEPTH = ScopedValue('ghost_public_execution_depth',default=0)
 _ENV_FIELDS = {
     'GHOST_CPU_FACTORIZATION': 'factorization',
     'GHOST_COMPRESSED_STORAGE_MIB': 'compressed_storage_mib',
@@ -237,14 +238,24 @@ def execution_scope(value, limit_blas=False, assembly_threads=None, memory_budge
 def configured_execution(function):
     """Accept execution_options at public solver entry points."""
     signature = inspect.signature(function)
-    @wraps(function)
-    def call(*args, **kwargs):
+    def invoke_configured(*args, **kwargs):
         execution_start=time.perf_counter()
         requested = kwargs.pop('execution_options', None)
         inherited = current_options()
         # Public convenience spelling; internally retain the existing CPU
         # kernel/field lifecycle, with an explicitly matrix-free factorization.
         supplied=signature.bind(*args,**kwargs)
+        # Normalize at the public boundary before planners or nested solves use
+        # sequence truth tests. Keep dimensionality and finite-value validation.
+        import numpy as np
+        for name in ('frequencies_ghz','elevations_deg','incidence_angles_deg','observation_angles_deg'):
+            if name not in supplied.arguments or supplied.arguments[name] is None:
+                continue
+            raw=np.asarray(supplied.arguments[name])
+            if raw.ndim != 1 or raw.dtype.kind not in 'iuf':
+                raise ValueError('{} must be a one-dimensional real numeric sequence.'.format(name))
+            supplied.arguments[name]=raw.tolist()
+        args,kwargs=supplied.args,supplied.kwargs
         method_parameter=signature.parameters.get('solver_method')
         public_method=str(supplied.arguments.get('solver_method',method_parameter.default if method_parameter else '')).strip().lower()
         automatic=public_method=='auto' and 'monostatic' in function.__name__
@@ -286,6 +297,14 @@ def configured_execution(function):
         value = validate_for_run(value, method=bound.arguments.get('solver_method', 'direct'),
                          precision=requested_precision(),
                          scattering='bistatic' if 'bistatic' in function.__name__ else 'monostatic')
+        timing_key=None
+        if _PUBLIC_DEPTH.get()==1 and 'monostatic' in function.__name__:
+            from ghost_backend.execution.timing_history import request_key
+            try:
+                with execution_scope(value):
+                    timing_key=request_key(bound.arguments,value,function.__name__)
+            except (OSError,TypeError,ValueError):
+                pass  # Optional timing evidence never replaces input validation.
         selection = None
         requested_value = value
         if value['factorization'] == 'adaptive':
@@ -294,10 +313,14 @@ def configured_execution(function):
                 _validate_disabled_2d_cfie_alpha(bound.arguments['cfie_alpha'])
             from ghost_backend.execution.selection import select_backend, current_batch_selection
             selection = current_batch_selection()
+            batch_planned=selection is not None
             if selection is None:
                 planning_start=time.perf_counter()
                 selection = select_backend(bound.arguments, value, certified='certified' in function.__name__)
                 selection['planning_seconds']=time.perf_counter()-planning_start
+            if timing_key is not None:
+                from ghost_backend.execution.timing_history import adjust
+                selection=adjust(selection,timing_key,batch=batch_planned)
             value = dict(value, factorization=selection['selected'])
         if bound.arguments.get('solver_method') == 'auto' and value['factorization'] in ('compressed','fmm'):
             bound.arguments['solver_method']='experimental_cpu'
@@ -346,7 +369,14 @@ def configured_execution(function):
                     result['metadata']['solver_method_requested']='auto'
                 result['metadata']['execution_threads'] = dict(
                     assembly=effective_assembly_threads(), blas=current_options()['blas_threads'])
+                if timing_key is not None:
+                    from ghost_backend.execution.timing_history import record
+                    record(timing_key,value['factorization'],result['metadata']['execution_wall_seconds'],result['metadata'])
             return result
+    @wraps(function)
+    def call(*args,**kwargs):
+        with _PUBLIC_DEPTH.override(_PUBLIC_DEPTH.get()+1):
+            return invoke_configured(*args,**kwargs)
     parameters = list(signature.parameters.values())
     parameters.append(inspect.Parameter('execution_options', inspect.Parameter.KEYWORD_ONLY, default=None))
     call.__signature__ = signature.replace(parameters=parameters)

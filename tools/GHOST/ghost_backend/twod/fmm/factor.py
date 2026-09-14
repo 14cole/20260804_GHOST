@@ -23,6 +23,9 @@ class FMMFactor:
         self.maxiter=option('fmm_max_iterations',800)
         self.recycle_limit=option('fmm_recycle_vectors',12)
         self.recycled=[]
+        self.coordinates=kwargs.get('coordinates')
+        self.coarse_attempted=False
+        self.coarse_trial=None
         near=matrix.sparse_near()
         self.row=1/np.maximum(abs(near).max(axis=1).toarray().ravel(),1e-300)
         scaled=diags(self.row)@near
@@ -61,6 +64,67 @@ class FMMFactor:
             estimate=float(onenormest(self.eq)*onenormest(inverse))
             if not np.isfinite(estimate):raise RuntimeError('FMM condition estimate is nonfinite.')
             diagnostics.update(condition_est=estimate,condition_method='near_equilibrated_1norm_fmm_gmres_estimate')
+
+    @timed_stage('fmm_coarse_setup')
+    def _coarse_correction(self):
+        """A bounded spatial coarse solve supplements the near-field ILU.
+
+        P = M + (Z-MAZ)(Z*AZ)^-1 Z*. No operator is approximated here;
+        original-equation residual checks still decide acceptance.
+        """
+        self.coarse_attempted=True
+        n=len(self.a)
+        coordinates=np.asarray(self.coordinates)
+        if coordinates.shape != (n,2) or not np.all(np.isfinite(coordinates)):
+            return False
+        groups=[np.arange(n)]
+        while len(groups)<16:
+            index=max(range(len(groups)),key=lambda j:len(groups[j]))
+            ids=groups.pop(index)
+            if len(ids)<4:return False
+            axis=int(np.argmax(np.ptp(coordinates[ids],axis=0)))
+            ids=ids[np.argsort(coordinates[ids,axis],kind='stable')]
+            groups.extend((ids[:len(ids)//2],ids[len(ids)//2:]))
+        z=np.zeros((n,len(groups)),complex)
+        for j,ids in enumerate(groups):z[ids,j]=1/np.sqrt(len(ids))
+        self.checkpoint()
+        az=self.eq@z
+        e=z.conj().T@az
+        if not np.all(np.isfinite(e)) or np.linalg.cond(e)>1e8:
+            self.details['coarse_rejection']='Ill-conditioned coarse system'
+            return False
+        inv=np.linalg.inv(e)
+        lu=self.lu
+        q=z-lu.solve(az)
+        previous=(self.pre,self.preh,list(self.recycled))
+        self.pre=LinearOperator((n,n),dtype=complex,
+            matvec=lambda b:lu.solve(b)+q@(inv@(z.conj().T@b)))
+        self.preh=LinearOperator((n,n),dtype=complex,
+            matvec=lambda b:lu.solve(b,trans='H')+z@(inv.conj().T@(q.conj().T@b)))
+        # Keep the useful directions, but invalidate products of the old
+        # preconditioner. LGMRES recomputes entries whose product is None.
+        self.recycled[:]=[(v,None) for v,_ in self.recycled]
+        if self.details['iterations']:
+            self.coarse_trial=(previous,self.details['iterations'][-1])
+        self.details.update(preconditioner='equilibrated_ilu_with_spatial_coarse_correction',
+            coarse_vectors=len(groups),coarse_storage_bytes=z.nbytes+q.nbytes+inv.nbytes,
+            coarse_setup_operator_columns=len(groups))
+        return True
+
+    def _finish_coarse_trial(self,iterations,remaining,failure=None):
+        if self.coarse_trial is None:return
+        previous,reference=self.coarse_trial
+        self.coarse_trial=None
+        # Demand an observed reduction with enough remaining work to repay
+        # setup. This is a work estimate, not a promise about later angles.
+        if failure is None and iterations<.95*reference and (reference-iterations)*remaining>=16:
+            self.details['coarse_trial_accepted']=True
+            return
+        self.pre,self.preh,recycled=previous
+        self.recycled[:]=recycled
+        self.details.update(preconditioner='equilibrated_sparse_ilu',
+            coarse_trial_accepted=False,coarse_storage_bytes=0,
+            coarse_rejection=failure or 'Observed iteration savings do not repay setup')
 
     def _solve_eq(self,b,adjoint=False,condition=False):
         b=np.asarray(b).reshape(-1)
@@ -125,7 +189,21 @@ class FMMFactor:
             if rank<.7*b.shape[1]:
                 to_solve=q[:,:rank]
                 recovery=np.empty((rank,b.shape[1]),complex);recovery[:,piv]=r[:rank]
-        x=np.column_stack([self._solve_eq(column) for column in to_solve.T])
+        solutions=[]
+        for j,column in enumerate(to_solve.T):
+            remaining=to_solve.shape[1]-j-1
+            try:solution=self._solve_eq(column)
+            except FMMConvergenceError:
+                if self.coarse_trial is None:raise
+                self._finish_coarse_trial(0,remaining,failure='Trial failed the checked solve; restored ILU')
+                solution=self._solve_eq(column)
+            solutions.append(solution)
+            self._finish_coarse_trial(self.details['iterations'][-1],remaining)
+            if (getattr(self.a,'spatial_coarse_eligible',False) and
+                    not self.coarse_attempted and len(self.a)>=128 and
+                    remaining>=8 and self.details['iterations'][-1]>=24):
+                self._coarse_correction()
+        x=np.column_stack(solutions)
         if recovery is not None:x=x@recovery
         x=self.col[:,None]*x
         residual=self.a@x-b

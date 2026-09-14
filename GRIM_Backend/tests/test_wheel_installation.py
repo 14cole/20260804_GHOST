@@ -1,5 +1,6 @@
 """Exercise the shipped editor without editable-checkout import fallbacks."""
 import json
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -35,6 +36,14 @@ class InstalledWheelTests(unittest.TestCase):
             # -S prevents that; add dependency directories explicitly so Qt is
             # available while no repository or editable import hook is loaded.
             dependencies = sorted({sysconfig.get_path("purelib"), sysconfig.get_path("platlib")})
+            # Dependencies can live in an explicit shared runtime directory.
+            # Add their package roots without executing any editable .pth hooks.
+            for module in ('numpy','scipy','PySide6','shiboken6','matplotlib'):
+                spec=importlib.util.find_spec(module)
+                if spec is not None and spec.origin:
+                    directory=str(Path(spec.origin).resolve().parent.parent)
+                    if Path(directory).name in ('site-packages','dist-packages') and directory not in dependencies:
+                        dependencies.append(directory)
             script = '''
 import json, sys
 from pathlib import Path

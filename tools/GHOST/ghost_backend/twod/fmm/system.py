@@ -13,6 +13,7 @@ class FMMSystem(LinearOperator):
         super().__init__(dtype=np.dtype(complex),shape=(n,n))
         self.jumps=csr_matrix((n,n),dtype=complex) if jumps is None else jumps.astype(complex).tocsr()
         self.terms=[];self.endpoints=np.empty(0,int)
+        self.spatial_coarse_eligible=False
 
     def __len__(self):return self.shape[0]
 
@@ -76,4 +77,5 @@ class FMMSystem(LinearOperator):
             kernel_tolerances=[k.eps for k in self.kernels],
             quadrature_orders=[k.order for k in self.kernels],
             dense_matrix_built=False,approximation_error_certified=False,
+            spatial_coarse_eligible=self.spatial_coarse_eligible,
             residual_operator='locally_corrected_fmm_galerkin')
