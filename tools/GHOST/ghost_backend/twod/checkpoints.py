@@ -35,7 +35,8 @@ def input_identity(arguments, options, precision, certified):
     source = hashlib.sha256()
     backend = Path(__file__).resolve().parents[1]
     for folder in ('twod', 'compressed', 'linalg', 'execution', 'runs', 'geometry'):
-        for path in sorted((backend / folder).rglob('*.py')):
+        for path in sorted(p for p in (backend / folder).rglob('*')
+                           if p.is_file() and p.suffix in ('.py','.f','.f90','.c','.dll','.so','.dylib')):
             source.update(str(path.relative_to(backend)).replace('\\', '/').encode('utf-8'))
             source.update(path.read_bytes())
     inputs = {key: value for key,value in arguments.items()

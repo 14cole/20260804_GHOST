@@ -6,6 +6,10 @@ from ghost_backend.twod.assembly.session import current_session, system_key
 
 def assemble_system(mesh, infos, pol, k0, obs_order=8, src_order=8, operator_cache=None):
     import ghost_backend.twod.solver as rcs
+    from ghost_backend.twod.fmm.runtime import enabled as fmm_enabled, native as fmm_native
+    if fmm_enabled():
+        operator,oracle=fmm_native(mesh,infos,pol,k0,'robin',obs_order,src_order)
+        return operator,oracle.alpha,oracle.pec_nodes
     from ghost_backend.compressed.runtime import enabled, native
     if enabled():
         operator,oracle=native(mesh,infos,pol,k0,'robin',obs_order,src_order)

@@ -209,6 +209,17 @@ GHOST_MODULE_LOCATIONS = {
 }
 
 GHOST_SENTINELS = (
+    "execution/errors.py",
+    "execution/policy.py",
+    "runs/batch.py",
+    "runs/presets.py",
+    "twod/assembly/separation.py",
+    "twod/fmm/__init__.py",
+    "twod/fmm/factor.py",
+    "twod/fmm/galerkin.py",
+    "twod/fmm/kernel.py",
+    "twod/fmm/runtime.py",
+    "twod/fmm/system.py",
     "execution/thread_control/__init__.py",
     "execution/thread_control/_threadpoolctl.py",
     "execution/thread_control/_threadpoolctl_py36.py",

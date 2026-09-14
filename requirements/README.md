@@ -1,9 +1,11 @@
 # Reproducible Windows dependency bundle
 
-For the separate headless GHOST Python 3.6.8 HPC environment, use
-[`hpc-py36.txt`](hpc-py36.txt) and the
-[cluster setup/test instructions](../tools/GHOST/HPC.md). That profile is not
-the desktop dependency lock described below.
+For current headless GHOST HPC/local execution, use Python 3.10 or newer with
+[`hpc.txt`](hpc.txt) and the [cluster setup instructions](../tools/GHOST/HPC.md).
+The historical `hpc-py36.txt` applies only to the older solver revision; it is
+not a supported environment for the accelerated solver merged here. Desktop
+verification uses the Windows Python 3.12 lock below, including pytest for the
+new accelerated-solver acceptance suite.
 
 GHOST includes threadpoolctl and its licenses in
 `tools/GHOST/ghost_backend/execution/thread_control/`; it is not an external

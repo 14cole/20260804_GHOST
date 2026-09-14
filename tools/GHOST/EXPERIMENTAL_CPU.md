@@ -7,10 +7,11 @@ angle is computed and checked against its original equation. No GPU is required.
 
 ## Select the option
 
-New desktop 2D monostatic runs use **CPU streaming (experimental)** with
-compressed assembly. Local/HPC drivers default to `SOLVE_PRESET="auto"`,
-choosing dense/compressed work to minimize predicted batch completion time.
-See [execution presets](RUN_PROFILES.md).
+New desktop 2D monostatic runs use **Automatic**; local/HPC drivers default to
+`SOLVE_PRESET="auto"`. They compare compatible dense, compressed, and FMM work
+under memory and predicted-time constraints. CPU streaming is still available
+as an explicit advanced override. See [execution presets](RUN_PROFILES.md) and
+[the current automatic solver guide](AUTOMATIC_SOLVER.md).
 Selecting CPU streaming sets LU precision to Double; mixed
 precision is a separate option and cannot be combined with this method.
 The newer optional hierarchical factor and automatic sweep compression are
@@ -113,10 +114,11 @@ and the formulation assemblers. It does not import the
 `experiments` folder or replace module functions at runtime. Install/copy the
 complete updated ghost_backend when using a separate headless installation.
 
-Qualification covers desktop Python 3.12 and actual Python 3.6.8 environments
-with NumPy 1.19.5/SciPy 1.5.4 and NumPy 1.14.3/SciPy 1.0.0. HPC worker execution,
-portable requests, export and resume were exercised locally; this does not
-establish performance on a remote cluster or across multiple nodes.
+Current qualification uses desktop Python 3.12. The earlier implementation
+was also checked on Python 3.6.8 with older numerical libraries; those historical
+results do not qualify that runtime for the current accelerated solver. HPC
+worker execution, portable requests, export, and resume are exercised locally;
+this does not establish remote-cluster or multi-node performance.
 
 Regression entry points:
 

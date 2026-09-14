@@ -86,8 +86,9 @@ and mass allocations, operator lifetime at factorization, phase budgeting,
 configurable angle batches with one factorization, bounded checks, and mixed
 precision adjoint/fallback behavior.
 
-The change was also checked against saved pre-change multi-region matrices,
+This earlier compact-storage change was also checked against saved pre-change multi-region matrices,
 RHS vectors and fields, the existing 2D physics/accuracy and solver suites,
 HPC scheduling and local-driver checks, and the Python 3.6.8 / NumPy 1.14.3 /
-SciPy 1.0.0 compatibility runtime. It introduces no FMM backend, basis change,
-material approximation, automatic mesh coarsening, or angle interpolation.
+SciPy 1.0.0 compatibility runtime. Those results describe that historical
+revision. See [the current automatic solver guide](AUTOMATIC_SOLVER.md) for
+the subsequent FMM integration and the current Python/runtime requirements.

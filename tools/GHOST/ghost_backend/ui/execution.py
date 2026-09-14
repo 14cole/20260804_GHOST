@@ -21,13 +21,13 @@ class ExecutionOptionsWidget(QGroupBox):
         super().__init__('2D execution and resources', parent)
         form = QFormLayout(self)
         self.factor_combo = QComboBox()
-        for label, value in [('Dense LU', 'dense'), ('Hierarchical factor (dense assembly)', 'hierarchical'),
+        for label, value in [('Automatic (recommended)', 'adaptive'), ('Dense LU', 'dense'), ('Hierarchical factor (dense assembly)', 'hierarchical'),
                              ('Compressed assembly (low RAM)', 'compressed'),
-                             ('RAM-aware dense / compressed', 'adaptive'),
+                             ('FMM / GMRES (experimental, low RAM)', 'fmm'),
                              ('Hierarchical with dense fallback', 'auto')]:
             self.factor_combo.addItem(label, value)
-        self.factor_combo.setToolTip('Compressed assembly avoids global dense matrices. Hierarchical factorization still assembles a dense operator.')
-        form.addRow('Factorization', self.factor_combo)
+        self.factor_combo.setToolTip('Automatic chooses a compatible dense, compressed, or FMM backend using predicted runtime and available RAM. Numerical accuracy settings stay in force. Other choices are expert overrides; the selected backend and its reason are recorded with results.')
+        form.addRow('Solver backend override', self.factor_combo)
         self.ram_spin = QDoubleSpinBox()
         self.ram_spin.setRange(0, 1048576)
         self.ram_spin.setDecimals(3)
@@ -101,7 +101,7 @@ class ExecutionOptionsWidget(QGroupBox):
             self.temp_edit.setText(path)
 
     def _changed(self, *_):
-        self.storage_spin.setEnabled(self.factor_combo.currentData() in ('compressed', 'adaptive'))
+        self.storage_spin.setEnabled(self.factor_combo.currentData() in ('compressed', 'adaptive','fmm'))
         self.changed.emit()
 
     def _ram_changed(self, *_):

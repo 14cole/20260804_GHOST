@@ -101,9 +101,12 @@ def unit_execution(function):
                 event['phase'] + ': ' if event['phase'] else '', event['stage'],
                 event['elapsed_seconds'], memory), flush=True)
         from ghost_backend.execution.selection import batch_selection_scope
+        selection=context.get('batch_backend_selection')
+        reservation=(selection.get('candidates',{}).get(selection['selected'],{}).get('peak_gb')
+                     if selection else None)
         with execution_scope(profile, limit_blas=True,
-                             assembly_threads=context.get('execution_assembly_threads')), \
-                batch_selection_scope(context.get('batch_backend_selection')):
+                             assembly_threads=context.get('execution_assembly_threads'),memory_budget_gib=reservation), \
+                batch_selection_scope(selection):
             with progress_listener(progress):
                 return function(unit, context, destination)
     return call

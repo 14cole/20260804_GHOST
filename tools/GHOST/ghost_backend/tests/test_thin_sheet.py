@@ -2,6 +2,7 @@
 from pathlib import Path
 import sys
 import unittest
+import importlib.util
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -181,6 +182,7 @@ class ThinSheetPhysicsTests(unittest.TestCase):
             self.assertTrue(bi["metadata"]["thin_layer"][pol])
         self.assertIn("runtime_profile", mono["metadata"])
 
+    @unittest.skipUnless(importlib.util.find_spec('PySide6'), 'Install the GUI extra for editor tests.')
     def test_file_and_editor_roundtrip_do_not_coerce_layer_to_impedance(self):
         ibcs, dielectrics = [["1", "thin_dielectric", ".001", "2"]], [["2", "3", "0", "1", "0"]]
         text = build_geometry_text("film", [], ibcs, dielectrics)
@@ -206,6 +208,7 @@ class ThinSheetPhysicsTests(unittest.TestCase):
             tab.deleteLater()
             app.processEvents()
 
+    @unittest.skipUnless(importlib.util.find_spec('PySide6'), 'Install the GUI extra for dialog tests.')
     def test_thin_layer_dialog_accepts_inches_and_returns_meters(self):
         from PySide6.QtWidgets import QApplication, QDialog, QDoubleSpinBox
         from ghost_backend.geometry.materials import choose_thin_layer

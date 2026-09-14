@@ -104,7 +104,7 @@ class CoPolarizedSolverContractTests(unittest.TestCase):
             for removed in ("polarization", "cfie_alpha"):
                 self.assertNotIn(removed, parameters)
             if "monostatic" in solve.__name__:
-                self.assertEqual(parameters["solver_method"].default, "direct")
+                self.assertEqual(parameters["solver_method"].default, "auto")
             else:
                 self.assertNotIn("solver_method", parameters)
 
@@ -127,6 +127,7 @@ class CoPolarizedSolverContractTests(unittest.TestCase):
                 geometry_snapshot={"segments": []},
                 frequencies_ghz=[1.0],
                 elevations_deg=[0.0, 30.0],
+                solver_method="direct",  # Isolate channel merging from geometry planning.
             )
 
         self.assertEqual([call["polarization"] for call in calls], ["TE", "TM"])
@@ -322,6 +323,7 @@ class CoPolarizedSolverContractTests(unittest.TestCase):
                 geometry_snapshot={"segments": []},
                 frequencies_ghz=[1.0],
                 elevations_deg=[0.0, 30.0],
+                solver_method="direct",  # Isolate channel certification from planning.
             )
         mesh = result["metadata"]["mesh_convergence"]
         self.assertEqual(calls, ['TE', 'TM', 'TE', 'TM'])

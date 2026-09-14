@@ -114,19 +114,19 @@ class RunSetupMixin:
         self.geometry_preset_notice = QLabel()
         self.geometry_preset_notice.setWordWrap(True)
         for name, label, description in (
+            ('adaptive', 'Automatic (recommended)',
+             'The solver chooses a compatible backend using estimated runtime and available memory. Accuracy checks remain enabled as configured.'),
             ('small', 'Small Geometry (No RAM Optimization)',
              'Dense solve without sweep compression. Use when the geometry fits comfortably in RAM.'),
             ('large', 'Large Geometry (RAM Optimization)',
              'Reduces RAM for large geometries and wide sweeps. May take longer for small geometries.'),
-            ('adaptive', 'Automatic (RAM-aware)',
-             'Chooses dense or compressed after forecasting both certification meshes.'),
             ('balanced', 'Balanced',
              'Reuses work across angles with a dense solve. Uses more RAM than Large Geometry.'),
         ):
             self.geometry_preset_combo.addItem(label, name)
             self.geometry_preset_combo.setItemData(self.geometry_preset_combo.count() - 1, description, Qt.ToolTipRole)
-        form.insertRow(2, 'Geometry preset', self.geometry_preset_combo)
-        form.insertRow(3, self.geometry_preset_notice)
+        details.addRow('Performance override', self.geometry_preset_combo)
+        form.insertRow(2, self.geometry_preset_notice)
         self.geometry_preset_combo.currentIndexChanged.connect(self._apply_geometry_preset)
         method = self.cmb_solver_method
         precision = self.cmb_lu_precision
@@ -203,6 +203,9 @@ class RunSetupMixin:
             ignored = {'ram_budget_gib', 'temporary_directory'}
             if current is None:
                 break
+            if self.geometry_preset_combo.itemData(index) == 'adaptive' and current['factorization']=='adaptive' and method=='auto' and precision=='double':
+                match=index
+                break
             if current['factorization'] == 'dense':
                 ignored.add('compressed_storage_mib')
             if (value['solver_method'] == method and value['lu_precision'] == precision
@@ -258,7 +261,9 @@ class RunSetupMixin:
         precision = self.cmb_lu_precision
         factor = self.execution_options_widget.factor_combo.currentData()
         solver = self.cmb_solver_kind
-        if solver.currentData() == '2d' and factor in ('compressed', 'adaptive'):
+        if solver.currentData() == '2d' and factor == 'adaptive':
+            method.setCurrentIndex(method.findData('auto'))
+        if solver.currentData() == '2d' and factor in ('compressed', 'fmm'):
             method.setCurrentIndex(method.findData('experimental_cpu'))
         if factor != 'dense':
             precision.setCurrentIndex(precision.findData('double'))
@@ -293,7 +298,7 @@ class RunSetupMixin:
         for combo,key in [(self.cmb_accuracy_target,'accuracy'), (self.cmb_lu_precision,'lu_precision')]:
             combo.setCurrentIndex(combo.findData(value[key]))
         method = self.cmb_solver_method
-        method.setCurrentIndex(method.findData('direct' if value['solver_method'] == 'auto' else value['solver_method']))
+        method.setCurrentIndex(method.findData(value['solver_method']))
         self.execution_options_widget.set_value(value['execution_options'])
         del blockers
         self._sync_execution_options()

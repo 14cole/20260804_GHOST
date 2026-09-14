@@ -24,7 +24,7 @@ knobs below mean the same thing in each.
 The 2D scripts expose `SOLVE_PRESET="auto"`, with `small`, `balanced`, and
 `large` as explicit alternatives. Use `ADVANCED_OVERRIDES` for individual
 execution settings. Auto targets predicted batch completion time, including
-the number of simultaneous dense/compressed solves that fit the allocation.
+the number of simultaneous dense/compressed/FMM solves that fit the allocation.
 See [batch presets and compatibility](RUN_PROFILES.md).
 
 The `planned` messages happen before `sbatch`. Older compressed planning
@@ -37,46 +37,33 @@ checks. The log reports planning elapsed time separately from solve progress.
 
 ### Python environment and a driver in your own folder
 
-The headless GHOST HPC/local drivers support **Python 3.6.8** with **NumPy
-1.14.3 and SciPy 1.0.0**. This tested dependency profile, including optional
-psutil 5.9.8 memory sampling, is in
-[`requirements/hpc-py36.txt`](../../requirements/hpc-py36.txt). If those NumPy
-and SciPy versions are already installed, no upgrade is needed. Python 3.6.8
-with NumPy 1.19.5 and SciPy 1.5.4 has also been tested. The desktop
-application retains its separate Python 3.10+ packaging requirement and
-Windows Python 3.12 release environment; installing the desktop package is
-not required on the cluster.
-
-The backend bundles its Python 3.6 dataclasses support. Copy the **complete
-updated ghost_backend**, including `ghost_runtime.py` and `execution/_dataclasses.py`;
-do not add your own `dataclasses.py`. The compatibility changes also cover
-annotations, nested/threaded solver settings, file cleanup, bundle CLI
-operations, and older NumPy sorting, visibility, and read-only buffer behavior.
-The LU solver does not require SciPy's newer public `LinAlgWarning` export.
-Numerical assembly and solve algorithms are shared with desktop
-Python. Python 3.6 solver settings are thread-local; asynchronous task-local
-contexts are available only on Python 3.7+.
-
-From the repository root, check the environment using the same interpreter
-you will use to launch the driver:
+The current headless GHOST HPC/local drivers require **Python 3.10 or newer**,
+**NumPy 2.0 or newer**, and **SciPy 1.14 or newer**. Install the headless profile
+in a permitted virtual environment; the Qt desktop package is not required:
 
 ```bash
+python -m pip install -r requirements/hpc.txt
 python tools/GHOST/ghost_backend/hpc/check_environment.py
 ```
 
-It reports the interpreter, compiler, loaded backend, dependency versions, and
-a complex LU check. A `GCC ...` string identifies the compiler used to build
-Python; it is separate from the Python version. If dependencies are missing
-or older than the tested profile, install
-the pinned headless requirements in your permitted cluster environment:
+The environment check reports Python, dependencies, the loaded backend, a
+complex LU check, and native FMM availability. Native FMM is optional; Automatic
+excludes it when unavailable. Build it on each compatible worker platform using
+a complete GNU Fortran toolchain:
 
 ```bash
-python -m pip install --user -r requirements/hpc-py36.txt
+python tools/GHOST/ghost_backend/twod/fmm/native/build.py
 ```
 
-For an offline cluster, obtain matching **Linux CPython 3.6** wheels on a
-connected machine and install with `--no-index --find-links /path/to/wheels`.
-Windows wheels cannot be used on Linux.
+Set `FC` to the full compiler path if needed. Copy the complete matching
+`ghost_backend`, including the FMM sources and any native library built for the
+worker platform. A Windows DLL cannot be used on Linux. For offline installation,
+obtain wheels matching the cluster's operating system, architecture, and Python
+version, then use `--no-index --find-links /path/to/wheels`.
+
+The retained `requirements/hpc-py36.txt` is a historical profile for the older
+solver revision. It does not qualify Python 3.6 for this update. See
+[the automatic solver guide](AUTOMATIC_SOLVER.md) for deployment and numerical scope.
 
 You can keep a copy of `run_hpc_monostatic.py` or
 `run_hpc_bor_monostatic.py` in your study folder. Make the complete matching
@@ -85,10 +72,10 @@ backend imports (replace the example with your absolute Linux path):
 
 ```python
 import sys
-sys.path.insert(0, "/shared/path/to/GHOST/ghost_backend")
+sys.path.insert(0, "/shared/path/to/GHOST")
 ```
 
-`sys.path.insert` needs both the index and the path. A relative `"ghost_backend"`
+`sys.path.insert` needs both the index and the path. A relative `"GHOST"`
 path is resolved against the current working directory; it can stop working
 when a worker starts in the generated run directory. The drivers export the
 absolute backend path into their SLURM scripts after `JOB_PROLOGUE`, so workers
@@ -141,12 +128,11 @@ python tools/GHOST/ghost_backend/tests/test_hpc_scheduling.py
 python tools/GHOST/ghost_backend/tests/test_local_drivers.py
 ```
 
-Development validation used actual CPython 3.6.8 on Windows with NumPy 1.14.3
-and SciPy 1.0.0, including copied worker processes, CSV coatings, mixed precision,
-BoR, bundle/recovery contracts, and mesh/file-transaction checks. Those checks
-do not establish your cluster's Linux native libraries, SLURM setup, shared
-filesystem behavior, or large-job resource limits; the acceptance steps above
-cover the remaining deployment checks.
+The integrated accelerated solver is verified with Windows CPython 3.12.
+Historical Python 3.6 tests qualify only the older revision. Local automated
+checks do not establish a cluster's native libraries, SLURM setup, shared
+filesystem behavior, or large-job resource limits; use the acceptance steps
+above on the target cluster.
 
 ### Headless materials, accuracy, and Assembly
 

@@ -81,7 +81,8 @@ def solver_report_text(metadata):
         lines.append("Survey: the mesh-refinement comparison was not run.")
     profile = metadata.get("runtime_profile", {})
     if profile:
-        lines.append(f"Elapsed: {profile['wall_seconds']:.3f} s")
+        elapsed=metadata.get('execution_wall_seconds',profile['wall_seconds'])
+        lines.append(f"Elapsed: {elapsed:.3f} s")
         for name, value in sorted(profile.get("stage_seconds", {}).items()):
             lines.append(f"  {name.replace('_', ' ')}: {value:.3f} s")
         peak = profile.get("sampled_peak_process_rss_bytes")

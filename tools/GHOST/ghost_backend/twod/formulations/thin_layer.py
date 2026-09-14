@@ -144,6 +144,9 @@ def solve_thin_layer_fields(mesh, k0, incidence_angles_deg, polarization,
         raise ValueError("Thin-layer thickness/curvature radius exceeds 0.05; use explicit bulk geometry.")
 
     zero_contrast = eps == 1 and mu == 1
+    from ghost_backend.twod.fmm.runtime import enabled as fmm_enabled
+    if fmm_enabled() and not zero_contrast:
+        raise ValueError('The thin dielectric layer approximation is not yet supported by FMM; use explicit bulk dielectric boundaries or the dense/compressed backend.')
     resources = dict(formulation='thin_dielectric_layer', analytic_zero=zero_contrast)
     from ghost_backend.compressed.runtime import enabled as compressed_enabled
     if compressed_enabled() and not zero_contrast:

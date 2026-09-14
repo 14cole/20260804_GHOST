@@ -48,8 +48,8 @@ class ExperimentalGUI(unittest.TestCase):
         workspace = GhostWorkspace()
         try:
             tab = workspace.solver_tab
-            self.assertEqual(tab.cmb_solver_method.currentData(), 'experimental_cpu')
-            self.assertEqual(tab.execution_options_widget.value()['factorization'], 'compressed')
+            self.assertEqual(tab.cmb_solver_method.currentData(), 'auto')
+            self.assertEqual(tab.execution_options_widget.value()['factorization'], 'adaptive')
             tab.execution_options_widget.set_value(dict(factorization='dense'))
             tab.cmb_solver_method.setCurrentIndex(tab.cmb_solver_method.findData('direct'))
             tab.cmb_lu_precision.setCurrentIndex(tab.cmb_lu_precision.findData('mixed'))

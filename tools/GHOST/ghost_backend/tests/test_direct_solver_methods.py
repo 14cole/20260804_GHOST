@@ -33,7 +33,7 @@ class DirectSolverMethodTests(unittest.TestCase):
                 assemble.assert_not_called()
 
     def test_removed_method_is_rejected_before_any_geometry_work(self):
-        for method in ("fmm", " FMM ", "gmres", "unknown"):
+        for method in ("gmres", "unknown"):
             for solver, angles in (
                 (rcs.solve_monostatic_rcs_2d_single_polarization, {"elevations_deg": [0.0]}),
                 (rcs.solve_bistatic_rcs_2d_single_polarization,
@@ -55,7 +55,7 @@ class DirectSolverMethodTests(unittest.TestCase):
     def test_private_formulations_also_reject_retired_method(self):
         for solver in (rcs._solve_te_robin_mfie, rcs._solve_multi_region_indirect):
             with self.subTest(solver=solver.__name__):
-                with self.assertRaisesRegex(ValueError, "FMM solver has been removed"):
+                with self.assertRaisesRegex(ValueError, "public monostatic entry point"):
                     solver(None, [], "TE", 1.0, [0.0], solver_method="fmm")
 
     def test_auto_and_direct_reach_geometry_preflight(self):

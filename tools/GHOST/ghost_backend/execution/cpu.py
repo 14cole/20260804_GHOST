@@ -117,6 +117,8 @@ def experimental_monostatic(function):
             metadata["solver_method"] = "dense_lu_experimental_cpu" if state.systems else "dense_lu"
             from ghost_backend.compressed.runtime import enabled
             if enabled() and state.systems:metadata['solver_method']='compressed_experimental_cpu'
+            from ghost_backend.twod.fmm.runtime import enabled as fmm_enabled
+            if fmm_enabled() and state.systems:metadata['solver_method']='galerkin_fmm_gmres'
             metadata["experimental_cpu"] = state.report()
             return result
     return call

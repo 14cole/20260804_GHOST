@@ -25,7 +25,7 @@ class BatchPresetTests(unittest.TestCase):
     def test_presets_resolve_in_both_drivers_and_survive_json_roundtrip(self):
         for driver in ('run_hpc_monostatic.py', 'run_local_monostatic.py'):
             kind, keys = driver_contract(BACKEND / driver)
-            for name, factor, method in [('auto', 'adaptive', 'experimental_cpu'),
+            for name, factor, method in [('auto', 'adaptive', 'auto'),
                     ('small', 'dense', 'direct'), ('balanced', 'dense', 'experimental_cpu'),
                     ('large', 'compressed', 'experimental_cpu')]:
                 raw = dict(SOLVE_PRESET=name, ADVANCED_OVERRIDES={'assembly_threads': 2},
@@ -107,7 +107,7 @@ class BatchPresetTests(unittest.TestCase):
             self.assertEqual(mesh.call_count, 4)  # one base/fine topology per frequency
             self.assertEqual(len(plans), 4)
             for p in plans.values():
-                self.assertEqual(set(p['backend_candidates']), {'dense', 'compressed'})
+                self.assertEqual(set(p['backend_candidates']), {'dense', 'compressed','fmm'})
                 self.assertFalse(p['backend_candidates']['compressed']['memory_estimate']['sampled'])
                 self.assertGreater(p['peak_gb'], 0)
 

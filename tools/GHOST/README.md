@@ -24,7 +24,7 @@ BOR controls include a bounded coefficient cache for compressed solves. See
 
 Only `run_gui.py` and the four local/HPC run scripts are directly inside
 `ghost_backend`. Native source, libraries, and build tools are under
-`ghost_backend/bor/native/`; runtime support is under `ghost_backend/execution/`.
+`ghost_backend/bor/native/` and `ghost_backend/twod/fmm/native/`; runtime support is under `ghost_backend/execution/`.
 
 Batch drivers save new runs under `ghost_backend/results/rcs_runs` or
 `ghost_backend/results/rcs_runs_bor` by default. Explicit output paths and saved
@@ -34,25 +34,14 @@ Use the [backend source guide](BACKEND.md) to find solvers, data I/O,
 geometry operations, feature assembly, and run management. The
 [file-removal audit](DEAD_FILES.md) identifies cleanup candidates.
 
-New 2D monostatic GUI and local/HPC runs default to the
-[CPU streaming (experimental) solver method](EXPERIMENTAL_CPU.md) for lower
-angle-workspace RAM and CPU acceleration of PEC/IBC and dielectric solves.
-The desktop's default [compressed CPU assembly path](COMPRESSED_CPU.md) avoids the
-global dense matrix and LU for supported 2D formulations. The saved resource
-preset uses 8192 MiB compressed storage, four assembly/two BLAS threads, automatic
-basis reuse, and 256-angle batches. Dense LU remains selectable for smaller runs.
-Batch scripts default to automatic dense/compressed selection for predicted
-batch completion time.
-
-The visible **Geometry preset** selector offers **Small Geometry (No RAM
-Optimization)**, **Large Geometry (RAM Optimization)**, **Balanced**, and
-**Automatic (RAM-aware)**. Large
-Geometry is the default. Detailed numerical and resource controls are under
-**Advanced Settings**, which starts collapsed in GHOST.
-[Saved execution profiles](RUN_PROFILES.md) document the preset combinations,
-factorization, RAM admission, compressed storage, temporary disk, CPU threads,
-and sweep batching. Profiles transfer through local/HPC manifests and exports.
-The guide also describes stage/RAM progress and the repeatable benchmark.
+New 2D monostatic GUI, API, and local/HPC runs default to **Automatic**.
+The backend compares compatible dense, compressed, and FMM Galerkin solves
+using geometry, materials, angle count, memory, and predicted computation cost.
+Users can run ordinary studies without choosing a solver implementation.
+Detailed kernel, factorization, and geometry presets are under **Advanced
+Settings**, which starts collapsed. Existing explicit saved settings are kept.
+See [automatic solver behavior and qualification](AUTOMATIC_SOLVER.md) and
+[saved execution profiles](RUN_PROFILES.md) for overrides and resource limits.
 
 [2D pipeline controls](TWOD_PIPELINE.md) describe automatic backend selection,
 optional local material meshing, faster geometry validation, and desktop
@@ -60,7 +49,7 @@ frequency checkpoints with verified resume.
 
 Local and HPC batch drivers accept `--config path/to/settings.config.json`.
 The 2D scripts expose `SOLVE_PRESET="auto"` plus optional `ADVANCED_OVERRIDES`.
-Auto compares predicted completion of the batch with dense, compressed, and
+Auto compares predicted completion of the batch with dense, compressed, FMM, and
 mixed workers on the execution node. `small`, `balanced`, and `large` select
 the corresponding desktop presets. See [batch presets](RUN_PROFILES.md).
 They also automatically load an adjacent file with the same stem and the
@@ -101,11 +90,11 @@ The recommended desktop workflow is the top-level GRIM application. Its
 **GHOST** tab embeds the same `ghost_backend/run_gui.py` workspace and the same
 2-D/BoR numerical implementation found here; no solver is duplicated.
 
-The 2-D diagnostic API accepts `auto` and `direct` for reference kernels and
-`experimental_cpu` for CPU streaming. Explicit execution profiles select dense,
-hierarchical, or compressed factorization within the supported combinations.
-NumPy and SciPy are required for numerical methods and condition-number checks.
-BoR supports an optional native streaming kernel.
+The 2-D diagnostic API defaults to `auto`, with `direct`, `experimental_cpu`,
+and `fmm` available as explicit overrides. NumPy and SciPy are required for
+numerical methods and condition-number checks. Native FMM acceleration is
+optional; Automatic excludes FMM when its native library is unavailable.
+BoR supports its separate optional native streaming kernel.
 BoR also has [bounded aspect batches, incident-basis reuse, and experimental
 compressed modal assembly](BOR_PERFORMANCE.md), with separate controls in
 Advanced Settings and local/HPC driver configurations.

@@ -1,5 +1,13 @@
 # Using the solver and Assembly updates
 
+## Automatic 2-D solver integration
+
+New GUI/API/HPC monostatic runs select a compatible dense, compressed, or FMM
+Galerkin backend automatically. The update also includes corrected close-panel
+quadrature, persistent native FMM plans, recycled angle solves, memory admission,
+and recorded backend retries. Existing explicit profiles retain their settings.
+See [qualification, measured savings, and runtime setup](tools/GHOST/AUTOMATIC_SOLVER.md).
+
 ## PEC-backed coating collapsed by FREDDY (2D and BoR)
 
 For a dielectric stack on PEC, use FREDDY's **PEC-backed nominal IBC CSV** on

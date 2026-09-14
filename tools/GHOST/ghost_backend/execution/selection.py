@@ -1,14 +1,15 @@
-"""Conservative RAM-aware choice between existing dense and compressed paths."""
+"""Shared, capability-aware planning before allocating solver operators."""
 import math
 from ghost_backend.execution.options import execution_scope, validate_options
 from ghost_backend.execution.runtime import ScopedValue
+from ghost_backend.execution.policy import MODEL, BACKENDS, relative_cost, fmm_eligibility, rank_candidates, native_fmm_available
 
 _BATCH_SELECTION = ScopedValue('ghost_batch_backend_selection', default=None)
 
 
 def batch_selection_scope(value):
     if value is not None and (value.get('requested') != 'adaptive' or
-                              value.get('selected') not in ('dense', 'compressed')):
+                              value.get('selected') not in BACKENDS):
         raise ValueError('Invalid batch backend selection.')
     return _BATCH_SELECTION.override(value)
 
@@ -21,7 +22,7 @@ def current_batch_selection():
 def select_backend(arguments, options, certified=False, checkpoint=None):
     """Forecast both polarizations and certification meshes before allocating A.
 
-    Dense is preferred when its forecast fits with an additional 20% margin.
+    Rank compatible backends using mesh-specific work and memory forecasts.
     This is a deterministic resource heuristic, not a promise of minimum time.
     Explicit backend choices never call this function.
     """
@@ -46,6 +47,8 @@ def select_backend(arguments, options, certified=False, checkpoint=None):
         fine['_2d_certification_base_segment_n'] = [(list(seg.get('properties', [])) + [0, 0])[1] for seg in snapshot['segments']]
         geometries.append(('fine', fine))
     records = []
+    candidates={m:dict(cost=0.,peak_gb=0.) for m in BACKENDS}
+    exclusions={}
     dense = dict(validate_options(options), factorization='dense')
     with execution_scope(dense):
         budget = s._solve_memory_limit_gb()
@@ -62,22 +65,44 @@ def select_backend(arguments, options, certified=False, checkpoint=None):
                 # Conservative global mesh bounds local-material candidate sizes.
                 panels = s._build_panels(geometry, scale, wavelength, max_panels=arguments.get('max_panels', s.MAX_PANELS_DEFAULT))
                 k0 = 2 * math.pi * freq * 1e9 / s.C0
-                for pol in ('TE', 'TM'):
+                pols=(s._normalize_polarization(arguments['polarization']),) if 'polarization' in arguments else ('TE','TM')
+                for pol in pols:
                     infos = s._build_coupled_panel_info(panels, materials, freq, pol, k0)
                     mesh, _ = s._build_linear_mesh_interface_aware(panels, infos)
                     coupled = s._build_linear_coupled_infos(mesh, materials, freq, pol, k0)
                     layer = s.layer_for_mesh(mesh, materials, freq) if any(i.bc_kind == 'thin_layer' for i in coupled) else None
-                    resources = s._dense_formulation_resources(mesh, coupled, pol, layer)
-                    peak = s._estimate_memory_gb(resources['nodes'], False,
-                        n_regions=resources['n_regions'], system_dofs=resources['system_dofs'],
-                        operator_matrices=resources['operator_matrices'], dense_resources=resources,
-                        n_rhs=len(arguments['elevations_deg']), solver_method=arguments['solver_method'])
+                    resources = s._dense_formulation_resources(mesh, coupled, pol, layer, sample_compression=False)
+                    eligible,why=fmm_eligibility(resources,mesh,coupled)
+                    if not eligible:
+                        exclusions['fmm']=why
+                    peaks={}
+                    for mode in BACKENDS:
+                        if mode == 'fmm' and not eligible:
+                            continue
+                        with execution_scope(dict(dense,factorization=mode)):
+                            measured=dict(resources)
+                            peaks[mode]=s._estimate_memory_gb(resources['nodes'], False,
+                                n_regions=resources['n_regions'], system_dofs=resources['system_dofs'],
+                                operator_matrices=resources['operator_matrices'], dense_resources=measured,
+                                n_rhs=len(arguments['elevations_deg']), solver_method='experimental_cpu')
+                        candidates[mode]['cost']+=relative_cost(resources,len(arguments['elevations_deg']),mode)
+                        candidates[mode]['peak_gb']=max(candidates[mode]['peak_gb'],peaks[mode])
                     records.append(dict(frequency_ghz=float(freq), phase=phase, polarization=pol,
-                        panels=len(panels), unknowns=resources['system_dofs'], dense_peak_gib=peak))
+                        panels=len(panels), unknowns=resources['system_dofs'], dense_peak_gib=peaks['dense'],
+                        formulation=resources['formulation'],backend_peak_gib=peaks))
     peak = max(r['dense_peak_gib'] for r in records)
-    selected = 'dense' if peak <= .8 * budget else 'compressed'
+    if not native_fmm_available():
+        exclusions['fmm']='The native FMM library is unavailable on this execution host.'
+    candidates={m:c for m,c in candidates.items() if m not in exclusions}
+    try:
+        ranked=rank_candidates(candidates,budget)
+    except MemoryError as exc:
+        kinds=', '.join(sorted({r['formulation'] for r in records}))
+        raise MemoryError('{} Formulations: {}.'.format(exc,kinds)) from exc
+    selected=ranked[0]
     return dict(requested='adaptive', selected=selected, dense_peak_gib=peak,
+        model=MODEL,objective='predicted_solve_completion',candidates=candidates,
+        retry_order=ranked[1:],exclusions=exclusions,optimality_guaranteed=False,
         admission_budget_gib=budget, dense_margin_fraction=.2,
-        reason='Dense forecast fits with 20% additional headroom.' if selected == 'dense' else
-               'Dense forecast exceeds the selection margin; compressed admission is checked before assembly.',
+        reason='Lowest predicted cost among compatible backends admitted against available RAM.',
         meshes=records)

@@ -6,6 +6,8 @@ from ghost_backend.twod.assembly.session import current_session, system_key
 
 def assemble_system(mesh, infos, pol, k0, obs_order=8, src_order=8):
     import ghost_backend.twod.solver as rcs
+    from ghost_backend.twod.fmm.runtime import enabled as fmm_enabled, native as fmm_native
+    if fmm_enabled():return fmm_native(mesh,infos,pol,k0,'dielectric',obs_order,src_order)[0]
     from ghost_backend.compressed.runtime import enabled, native
     if enabled():return native(mesh,infos,pol,k0,'dielectric',obs_order,src_order)[0]
     n = len(mesh.nodes)

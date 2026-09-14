@@ -76,7 +76,7 @@ def _2d_panel_limit() -> 'int':
     from ghost_backend.compressed.runtime import enabled
     from ghost_backend.twod.constants import MAX_PANELS_DEFAULT
     from ghost_backend.execution.options import option
-    return 100_000 if enabled() or option('factorization') == 'adaptive' else MAX_PANELS_DEFAULT
+    return 100_000 if enabled() or option('factorization') in ('adaptive','fmm') else MAX_PANELS_DEFAULT
 
 
 def _result_kind(result: 'Dict[str, Any]') -> 'str':
@@ -1062,9 +1062,10 @@ class SolverTab(RunSetupMixin, QWidget):
         self.cmb_lu_precision.setToolTip("2D CPU only. Factors in single precision and checks double-precision residuals. Falls back to double LU if refinement stalls. Operator assembly still uses quadratic memory.")
         advanced_form.addRow("2D LU precision", self.cmb_lu_precision)
         self.cmb_solver_method = QComboBox()
+        self.cmb_solver_method.addItem("Automatic (recommended)", "auto")
         self.cmb_solver_method.addItem("Reference kernels", "direct")
         self.cmb_solver_method.addItem("CPU streaming (experimental)", "experimental_cpu")
-        self.cmb_solver_method.setToolTip("2D monostatic solves, including supported PEC, IBC, dielectric, mixed and sheet cases. Streams every requested angle in double precision. The launch configuration selects dense or compressed CPU factorization; compressed mode avoids a global dense matrix.")
+        self.cmb_solver_method.setToolTip("Automatic selects the kernel and backend for the geometry, materials, sweep and available resources. Manual kernel choices are advanced overrides.")
         self.cmb_solver_method.currentIndexChanged.connect(self._apply_job_state)
         advanced_form.addRow("2D kernel evaluation", self.cmb_solver_method)
         from ghost_backend.ui.bor_options import BorOptionsWidget
@@ -1474,8 +1475,10 @@ class SolverTab(RunSetupMixin, QWidget):
         self.cmb_accuracy_target.setEnabled(not busy)
         method_available = not is_bor and self.cmb_scatter_mode.currentData() == "monostatic"
         if not method_available:
-            self.cmb_solver_method.setCurrentIndex(0)
-        if method_available and self.execution_options_widget.factor_combo.currentData() in ('compressed', 'adaptive'):
+            self.cmb_solver_method.setCurrentIndex(self.cmb_solver_method.findData('direct'))
+        if method_available and self.execution_options_widget.factor_combo.currentData() == 'adaptive':
+            self.cmb_solver_method.setCurrentIndex(self.cmb_solver_method.findData('auto'))
+        if method_available and self.execution_options_widget.factor_combo.currentData() in ('compressed', 'fmm'):
             self.cmb_solver_method.setCurrentIndex(self.cmb_solver_method.findData('experimental_cpu'))
         if self.execution_options_widget.factor_combo.currentData() != 'dense':
             self.cmb_lu_precision.setCurrentIndex(self.cmb_lu_precision.findData('double'))
@@ -1489,7 +1492,7 @@ class SolverTab(RunSetupMixin, QWidget):
         self.execution_options_widget.setEnabled(not busy and not is_bor)
         self.bor_options_widget.setEnabled(not busy and is_bor)
         factor_widget.setEnabled(not busy and method_available)
-        self.cmb_solver_method.setEnabled(not busy and method_available and factor not in ('compressed', 'adaptive'))
+        self.cmb_solver_method.setEnabled(not busy and method_available and factor not in ('compressed', 'adaptive','fmm'))
         self.execution_options_widget.mesh_combo.setEnabled(not busy and method_available)
         if not is_bor and not method_available:
             self.execution_options_widget.mesh_combo.setCurrentIndex(0)

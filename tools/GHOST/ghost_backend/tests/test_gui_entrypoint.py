@@ -244,7 +244,7 @@ class TestGuiEntrypoint(unittest.TestCase):
             self.assertFalse(solver._is_solving)
             self.assertIsNone(solver._pending_solve_context)
             self.assertEqual(solver.progress.value(), 0)
-            self.assertIn("canceled", solver.lbl_status.text().lower())
+            self.assertRegex(solver.lbl_status.text().lower(), r"\bcancell?ed\b")
         finally:
             workspace.close()
 

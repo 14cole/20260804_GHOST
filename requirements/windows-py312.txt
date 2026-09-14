@@ -6,5 +6,6 @@ numpy
 matplotlib
 PySide6
 scipy
+pytest
 psutil
 pywin32; sys_platform == "win32"

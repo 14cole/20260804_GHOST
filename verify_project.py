@@ -112,6 +112,8 @@ def acceptance_suites(source_root: Path):
         ('GRIM tests', source_root,
          ('-m', 'unittest', 'discover', '-s', 'GRIM_Backend/tests', '-p', 'test*.py', '-v')),
         ('GHOST tests', source_root / 'tools/GHOST/ghost_backend', discover),
+        ('GHOST accelerated solver qualification', source_root / 'tools/GHOST',
+         ('scripts/check_headless.py',)),
         ('GHOST CEM tools tests', source_root / 'tools/GHOST/ghost_backend/data_tools', discover),
         ('GHOST HPC scheduling integration', source_root / 'tools/GHOST/ghost_backend',
          ('tests/test_hpc_scheduling.py',)),

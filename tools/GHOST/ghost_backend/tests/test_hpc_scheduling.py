@@ -1040,9 +1040,9 @@ def test_end_to_end():
               "every unit was pre-meshed for its cost estimate")
         check(all(float(r["peak_gb"]) > 0 for r in schedule["units"]),
               "every unit carries a memory estimate")
-        check(all(set(r.get('backend_candidates', {})) == {'dense', 'compressed'}
+        check(all(set(r.get('backend_candidates', {})) == {'dense', 'compressed', 'fmm'}
                   for r in schedule['units']),
-              "default auto captures both candidates before reaching a compute node")
+              "default auto captures all three candidates before reaching a compute node")
         costs = {r["unit"]: r["cost"] for r in schedule["units"]}
         by_freq = {}
         for name, cost in costs.items():

@@ -8,26 +8,25 @@ labels are limited to the selected segment and up to 99 flagged rows.
 
 ## Automatic backend selection
 
-Choose **Automatic (RAM-aware)** in Geometry preset, or **RAM-aware dense /
-compressed** in Advanced Settings. This selects CPU streaming, double precision,
-and execution option `factorization="adaptive"`. Existing presets and saved
-explicit backend choices keep their meaning. The older `auto` value still means
-hierarchical factorization with dense fallback.
+New monostatic GUI/API/HPC runs select **Automatic** by default. Manual kernel,
+factorization, and geometry presets remain in Advanced Settings. The saved
+factorization value is `adaptive`; explicit saved choices retain their meaning,
+including the older hierarchical-with-dense-fallback value `auto`.
 
-The selector forecasts dense storage for both polarizations and, for certified
-runs, both meshes. It prefers dense when the largest forecast fits within 80%
-of the admission budget. That budget already respects the configured limit and
-90% of detected available memory. Otherwise it selects compressed assembly,
-whose resource admission and payload limits are checked before assembly.
-This is a conservative resource heuristic, not a timing predictor. Metadata and
-the solver report include the choice, forecast, budget, and reason. Desktop
-checkpoints allow each frequency to choose independently; the preflight summary
-gives a conservative choice for the whole sweep. HPC planning and saved profiles
-also support `adaptive`.
-Local/HPC automatic batches additionally compare the predicted completion
-of dense, compressed and mixed schedules under the execution node's CPU and
-memory allocation. Their submission forecast builds meshes once and does not
-sample coefficient tiles. See [batch presets](RUN_PROFILES.md).
+The selector compares compatible dense, compressed, and FMM Galerkin backends
+using geometry, materials, angle count, certification meshes, estimated memory,
+and the shared computation-cost model. Available memory and any configured RAM
+budget constrain admission; supported candidates with extra headroom are
+preferred. Missing native libraries and unsupported FMM formulations exclude
+FMM. Automatic remains a timing heuristic, not a fastest-runtime guarantee.
+
+Numerical/storage failures may retry another admitted backend with unchanged
+accuracy tolerances. Invalid geometry, cancellation, and failed physical mesh
+convergence do not trigger these retries. Metadata records the choice,
+forecasts, reasons, failures, and total execution time. Local/HPC scheduling
+compares mixed backend batches within node CPU/RAM reservations; retry choices
+must fit the original unit's reservation. See [batch presets](RUN_PROFILES.md)
+and [qualification and limitations](AUTOMATIC_SOLVER.md).
 
 ## Local material sizing
 

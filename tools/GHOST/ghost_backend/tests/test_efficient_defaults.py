@@ -37,7 +37,7 @@ class EfficientDefaultsTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(os, 'cpu_count', return_value=8):
             profile = efficient_defaults()
             self.assertEqual((profile['factorization'], profile['compressed_storage_mib'],
-                              profile['assembly_threads'], profile['blas_threads']), ('compressed',8192,4,2))
+                              profile['assembly_threads'], profile['blas_threads']), ('adaptive',2048,4,2))
             self.assertEqual((profile['rhs_compression'], profile['angle_batch_size']), ('auto',256))
             self.assertIsNone(profile['ram_budget_gib'])
             self.assertEqual(from_environment(profile), profile)
@@ -57,7 +57,7 @@ class EfficientDefaultsTests(unittest.TestCase):
         import run_hpc_monostatic as hpc
         with mock.patch.dict(os.environ, {}, clear=True):
             for driver in (local,hpc):
-                self.assertEqual(driver.SOLVER_METHOD, 'experimental_cpu')
+                self.assertEqual(driver.SOLVER_METHOD, 'auto')
                 self.assertEqual(driver.LU_PRECISION, 'double')
                 self.assertTrue(driver.MESH_CERTIFICATION)
                 profile = driver_options(vars(driver))
@@ -65,7 +65,9 @@ class EfficientDefaultsTests(unittest.TestCase):
                 explicit = dict(vars(driver), EXECUTION_OPTIONS=validate_options(dict(factorization='dense')),
                                 SOLVER_METHOD='direct', LU_PRECISION='mixed')
                 self.assertEqual(driver_options(explicit)['factorization'], 'dense')
-                self.assertEqual(driver_options(dict(vars(driver), SOLVER_METHOD='direct'))['factorization'], 'dense')
+                # The named automatic preset remains authoritative; a manual
+                # kernel choice requires the explicit custom preset.
+                self.assertEqual(driver_options(dict(vars(driver), SOLVE_PRESET='custom', SOLVER_METHOD='direct'))['factorization'], 'dense')
             payload = configuration_payload('2d', {'LU_PRECISION':'mixed'}, local._CONFIG_KEYS)
             self.assertEqual(payload['settings']['SOLVER_METHOD'], 'direct')
 

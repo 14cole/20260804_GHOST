@@ -34,13 +34,13 @@ class ExecutionProfilesUI(unittest.TestCase):
             restored_window = None
             try:
                 tab = ghost.solver_tab
-                self.assertEqual(tab.geometry_preset_combo.currentData(), 'large')
-                self.assertEqual(receiver.geometry_preset_combo.currentData(), 'large')
+                self.assertEqual(tab.geometry_preset_combo.currentData(), 'adaptive')
+                self.assertEqual(receiver.geometry_preset_combo.currentData(), 'adaptive')
                 tab.cmb_accuracy_target.setCurrentIndex(tab.cmb_accuracy_target.findData('tight'))
                 tab.chk_mesh_certification.setChecked(False)
                 tab.execution_options_widget.set_value(dict(efficient_defaults(),
                     ram_budget_gib=4.250000017, temporary_directory=str(Path.cwd())))
-                for name in ('small', 'large', 'balanced', 'large', 'small'):
+                for name in ('adaptive', 'small', 'large', 'balanced', 'large', 'small'):
                     tab.geometry_preset_combo.setCurrentIndex(tab.geometry_preset_combo.findData(name))
                     recipe = tab._capture_run_setup()
                     expected = geometry_preset(name)
@@ -135,7 +135,7 @@ class ExecutionProfilesUI(unittest.TestCase):
                 self.assertTrue(advanced.isHidden())
                 self.assertTrue(advanced.isAncestorOf(item.execution_options_widget))
                 self.assertTrue(advanced.isAncestorOf(item.save_run_setup_button))
-                self.assertFalse(advanced.isAncestorOf(item.geometry_preset_combo))
+                self.assertTrue(advanced.isAncestorOf(item.geometry_preset_combo))
                 item.btn_advanced_settings.setChecked(True)
                 self.assertFalse(advanced.isHidden())
                 item.btn_advanced_settings.setChecked(False)
@@ -176,7 +176,7 @@ class ExecutionProfilesUI(unittest.TestCase):
                 for tab in (ghost.solver_tab,receiver):
                     self.assertEqual(tab.execution_options_widget.value(), expected)
                     recipe = tab._capture_run_setup()
-                    self.assertEqual(recipe['solver_method'], 'experimental_cpu')
+                    self.assertEqual(recipe['solver_method'], 'auto')
                     self.assertEqual(recipe['lu_precision'], 'double')
                     self.assertTrue(recipe['mesh_certification'])
                 recipe = receiver._capture_run_setup()
@@ -190,7 +190,7 @@ class ExecutionProfilesUI(unittest.TestCase):
                 self.assertEqual(restored._capture_run_setup(), recipe)
                 restored.execution_options_widget.defaults_button.click()
                 self.assertEqual(restored.execution_options_widget.value(), expected)
-                self.assertEqual(restored.cmb_solver_method.currentData(), 'experimental_cpu')
+                self.assertEqual(restored.cmb_solver_method.currentData(), 'auto')
                 self.assertEqual(restored.cmb_lu_precision.currentData(), 'double')
             finally:
                 for widget in (ghost, receiver_window, restored_window):

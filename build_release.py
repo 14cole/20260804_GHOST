@@ -95,6 +95,7 @@ REQUIRED_FILES = (
     CONSTRAINTS_PATH,
     "requirements/windows-py312.txt",
     "requirements/hpc-py36.txt",
+    "requirements/hpc.txt",
     "requirements/README.md",
     "requirements/wheelhouse_manifest.py",
     "requirements/test_wheelhouse_manifest.py",
@@ -117,6 +118,12 @@ REQUIRED_FILES = (
         for relative in GRIM_STARTUP_FILES
     ),
     "tools/GHOST/Launch_GHOST_GUI.bat",
+    "tools/GHOST/scripts/check_headless.py",
+    "tools/GHOST/ghost_backend/twod/fmm/native/build.py",
+    "tools/GHOST/ghost_backend/twod/fmm/native/plan.f90",
+    "tools/GHOST/ghost_backend/twod/fmm/native/THIRD_PARTY.md",
+    "tools/GHOST/ghost_backend/twod/fmm/native/vendor/LICENSE",
+    "tools/GHOST/ghost_backend/twod/fmm/native/vendor/UPSTREAM.json",
     *(
         f"tools/GHOST/ghost_backend/{Path(relative).as_posix()}"
         for relative in GHOST_SENTINELS
@@ -188,6 +195,7 @@ REQUIRED_INVENTORY_GLOBS = (
     "tools/GHOST/ghost_backend/*.py",
     "tools/GHOST/ghost_backend/**/*.py",
     "tools/GHOST/ghost_backend/tests/test*.py",
+    "tools/GHOST/ghost_backend/twod/fmm/native/vendor/**/*.f",
     "tools/GHOST/ghost_backend/data_tools/cem_tools/*.py",
     "tools/GHOST/ghost_backend/data_tools/tests/test*.py",
     "tools/FREDDY/ibc/*.py",

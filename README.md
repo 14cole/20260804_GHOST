@@ -7,6 +7,11 @@ solvers; FREDDY supplies planar material-stack, impedance, reflection,
 transmission, absorption, and material-mixing analysis. PPT builds uniform,
 previewed PowerPoint reports from loaded RCS datasets.
 
+New GHOST 2-D monostatic runs use **Automatic** backend selection in both the
+embedded GUI and the local/HPC drivers. The backend compares compatible dense,
+compressed, and FMM Galerkin implementations under the available memory budget.
+See [automatic solver behavior, setup, and measured savings](tools/GHOST/AUTOMATIC_SOLVER.md).
+
 Use results within their demonstrated physical scope: FREDDY predicts infinite
 planar stacks, GHOST 2-D predicts scattering width, and GHOST BoR models bodies
 of revolution. These quantities are not interchangeable. Review convergence,

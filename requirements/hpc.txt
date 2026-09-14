@@ -1,0 +1,4 @@
+# Current headless GHOST runtime. Python 3.10 or newer; no GUI dependencies.
+numpy>=2.0,<3
+scipy>=1.14,<2
+psutil>=5.9

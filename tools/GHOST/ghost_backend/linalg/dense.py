@@ -34,8 +34,8 @@ class DenseFactor:
             HierarchicalRejected,
         )
         self.factor_mode = factor_mode()
-        if self.factor_mode == 'compressed':
-            raise ValueError('Compressed factorization requires a geometry-built compressed operator.')
+        if self.factor_mode in ('compressed','fmm'):
+            raise ValueError('This factorization requires a geometry-built matrix-free or compressed operator.')
         if self.factor_mode != 'dense' and requested_precision() == 'mixed':
             raise ValueError('Hierarchical CPU factorization requires double precision.')
         if self.factor_mode == 'hierarchical' or self.factor_mode == 'auto' and len(self.a) >= 2048:

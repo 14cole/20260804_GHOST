@@ -1,0 +1,27 @@
+{
+  "upstream": {
+    "sha": "550dae5b77b1e006c8ffae37fc832f8c2b536871",
+    "url": "https://github.com/flatironinstitute/fmm2d",
+    "date": "2025-02-20T14:38:48Z"
+  },
+  "compiler": "GNU Fortran (Rev3, Built by MSYS2 project) 16.2.0",
+  "flags": [
+    "-O3",
+    "-funroll-loops",
+    "-std=legacy",
+    "-w",
+    "-fopenmp",
+    "-BC:\\msys64\\ucrt64\\lib\\gcc\\x86_64-w64-mingw32\\16.2.0/",
+    "-BC:\\msys64\\ucrt64\\bin/"
+  ],
+  "sha256": "6c6273d662afbc11336dab382c6d4076959d58f97d9946e520b2f307346d2088",
+  "ghost_plan_sha256": "dc1e5c4f4c1ca3985e9a29f2dad6a31833562cb989be9a38251f1b4cba5ccc1a",
+  "plan_flags": [
+    "-O3",
+    "-funroll-loops",
+    "-std=legacy",
+    "-fopenmp",
+    "-BC:\\msys64\\ucrt64\\lib\\gcc\\x86_64-w64-mingw32\\16.2.0/",
+    "-BC:\\msys64\\ucrt64\\bin/"
+  ]
+}

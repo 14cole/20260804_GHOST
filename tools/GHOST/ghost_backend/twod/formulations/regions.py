@@ -339,6 +339,8 @@ def _reuse_te_system(matrix, old, layout, mesh, obs_order, src_order):
 
 
 def assemble_system(mesh, infos, pol, obs_order=8, src_order=8):
+    from ghost_backend.twod.fmm.runtime import enabled as fmm_enabled, regional as fmm_regional
+    if fmm_enabled():return fmm_regional(mesh,infos,pol,obs_order,src_order)
     from ghost_backend.compressed.runtime import enabled, regional
     if enabled():return regional(mesh,infos,pol,obs_order,src_order)
     from ghost_backend.twod.assembly.session import current_session, system_key

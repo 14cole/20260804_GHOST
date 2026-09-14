@@ -27,3 +27,10 @@ pywin32==311; sys_platform == "win32"
 # the team wheelhouse so pip never needs to resolve build requirements online.
 setuptools==80.9.0
 wheel==0.45.1
+
+# Solver acceptance includes parametrized numerical and automatic-backend tests.
+pytest==9.1.1
+iniconfig==2.3.0
+pluggy==1.6.0
+Pygments==2.21.0
+colorama==0.4.6

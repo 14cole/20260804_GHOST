@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 
 from ghost_backend.execution.runtime import ScopedValue
 
@@ -25,11 +26,18 @@ DEFAULTS = {
     'assembly_tile': 0,
     'far_quadrature_order': 0,
     'far_grading': True,
+    'fmm_tolerance': 1e-10,
+    'fmm_solver_tolerance': 1e-9,
+    'fmm_restart': 80,
+    'fmm_max_iterations': 800,
+    'fmm_recycle_vectors': 12,
+    'fmm_pec_cfie': False,
 }
-EFFICIENT_DEFAULTS = dict(DEFAULTS, factorization='compressed', compressed_storage_mib=8192,
+EFFICIENT_DEFAULTS = dict(DEFAULTS, factorization='adaptive', compressed_storage_mib=2048,
                           assembly_threads=4, blas_threads=2)
 _ACTIVE = ScopedValue('ghost_execution_options', default=None)
 _ASSEMBLY_ALLOCATION = ScopedValue('ghost_assembly_allocation', default=None)
+_MEMORY_ALLOCATION = ScopedValue('ghost_memory_allocation', default=None)
 _BLAS_LOCK = threading.RLock()
 _ENV_FIELDS = {
     'GHOST_CPU_FACTORIZATION': 'factorization',
@@ -51,18 +59,27 @@ def validate_options(value):
     result.update(value)
     if type(result['version']) is not int or result['version'] != 1:
         raise ValueError('Unsupported execution settings version.')
-    if result['factorization'] not in ('dense', 'hierarchical', 'auto', 'compressed', 'adaptive'):
-        raise ValueError('Choose dense, hierarchical, auto, compressed, or adaptive factorization.')
+    if result['factorization'] not in ('dense', 'hierarchical', 'auto', 'compressed', 'adaptive', 'fmm'):
+        raise ValueError('Choose dense, hierarchical, auto, compressed, adaptive, or fmm factorization.')
+    for key in ('fmm_tolerance','fmm_solver_tolerance'):
+        number=result[key]
+        if type(number) not in (int,float) or not math.isfinite(number) or not 1e-13<=number<=1e-5:
+            raise ValueError('{} must be finite and between 1e-13 and 1e-5.'.format(key))
+    if result['fmm_tolerance']>result['fmm_solver_tolerance']:
+        raise ValueError('FMM kernel tolerance must not exceed solver tolerance.')
     if result['mesh_strategy'] not in ('global', 'local'):
         raise ValueError('Mesh strategy must be global or local.')
     if result['rhs_compression'] not in ('off', 'auto', 'on'):
         raise ValueError('RHS compression must be off, auto, or on.')
     for key, lower, upper in [('compressed_storage_mib', 16, 1048576),
                               ('blas_threads', 1, 1024), ('angle_batch_size', 1, 256),
-                              ('assembly_tile', 0, 65536), ('far_quadrature_order', 0, 64)]:
+                              ('assembly_tile', 0, 65536), ('far_quadrature_order', 0, 64),
+                              ('fmm_restart',10,512),('fmm_max_iterations',1,100000)]:
         number = result[key]
         if type(number) is not int or not lower <= number <= upper:
             raise ValueError('{} must be an integer from {} to {}.'.format(key, lower, upper))
+    if type(result['fmm_recycle_vectors']) is not int or not 0 <= result['fmm_recycle_vectors'] <= 64:
+        raise ValueError('FMM recycle vectors must be an integer from 0 to 64.')
     threads = result['assembly_threads']
     if threads != 'auto' and (type(threads) is not int or not 1 <= threads <= 1024):
         raise ValueError('Assembly threads must be auto or an integer from 1 to 1024.')
@@ -71,6 +88,8 @@ def validate_options(value):
         raise ValueError('RAM budget must be positive GiB or null for available memory.')
     if type(result['far_grading']) is not bool:
         raise ValueError('Far grading must be true or false.')
+    if type(result['fmm_pec_cfie']) is not bool:
+        raise ValueError('FMM PEC combined-field selection must be true or false.')
     directory = result['temporary_directory']
     if not isinstance(directory, str) or any(c in directory for c in '\r\n\x00'):
         raise ValueError('Temporary directory must be a path string.')
@@ -99,8 +118,9 @@ def geometry_preset(name):
         method = 'experimental_cpu'
     elif name == 'adaptive':
         values.update(factorization='adaptive')
-        method = 'experimental_cpu'
+        method = 'auto'
     elif name == 'large':
+        values.update(factorization='compressed',compressed_storage_mib=8192)
         method = 'experimental_cpu'
     else:
         raise ValueError('Choose small, balanced, large, or adaptive geometry settings.')
@@ -149,6 +169,10 @@ def effective_assembly_threads(fallback=1):
     return min(requested, allocation) if allocation is not None else requested
 
 
+def allocated_memory_budget():
+    return _MEMORY_ALLOCATION.get()
+
+
 def environment_value(name, default=''):
     """Read a captured solver setting, with launch-environment compatibility."""
     active = _ACTIVE.get()
@@ -171,7 +195,7 @@ def validate_for_run(options, method='direct', precision='double', scattering='m
         raise ValueError('Hierarchical and compressed selections apply to the 2D solver only.')
     if mode != 'dense' and (precision != 'double' or scattering != 'monostatic'):
         raise ValueError('Hierarchical and compressed runs require monostatic scattering and double precision.')
-    if mode in ('compressed', 'adaptive') and method != 'experimental_cpu':
+    if mode in ('compressed', 'adaptive', 'fmm') and method not in ('auto','experimental_cpu','fmm'):
         raise ValueError('Compressed assembly requires CPU streaming kernel evaluation.')
     if method == 'experimental_cpu' and (precision != 'double' or scattering != 'monostatic'):
         raise ValueError('CPU streaming requires monostatic scattering and double precision.')
@@ -188,11 +212,17 @@ def temporary_directory():
 
 
 @contextmanager
-def execution_scope(value, limit_blas=False, assembly_threads=None):
+def execution_scope(value, limit_blas=False, assembly_threads=None, memory_budget_gib=None):
     """Restore settings after completion or failure; optionally control native BLAS."""
     checked = validate_options(value)
     allocation = assembly_threads if assembly_threads is not None else _ASSEMBLY_ALLOCATION.get()
-    with _ACTIVE.override(checked), _ASSEMBLY_ALLOCATION.override(allocation):
+    memory=memory_budget_gib if memory_budget_gib is not None else _MEMORY_ALLOCATION.get()
+    if memory is not None and (not math.isfinite(memory) or memory <= 0):
+        raise ValueError('Allocated solve memory must be positive and finite.')
+    inherited_memory=_MEMORY_ALLOCATION.get()
+    if inherited_memory is not None:
+        memory=min(memory,inherited_memory)
+    with _ACTIVE.override(checked), _ASSEMBLY_ALLOCATION.override(allocation), _MEMORY_ALLOCATION.override(memory):
         if not limit_blas:
             yield checked
             return
@@ -209,8 +239,40 @@ def configured_execution(function):
     signature = inspect.signature(function)
     @wraps(function)
     def call(*args, **kwargs):
+        execution_start=time.perf_counter()
         requested = kwargs.pop('execution_options', None)
         inherited = current_options()
+        # Public convenience spelling; internally retain the existing CPU
+        # kernel/field lifecycle, with an explicitly matrix-free factorization.
+        supplied=signature.bind(*args,**kwargs)
+        method_parameter=signature.parameters.get('solver_method')
+        public_method=str(supplied.arguments.get('solver_method',method_parameter.default if method_parameter else '')).strip().lower()
+        automatic=public_method=='auto' and 'monostatic' in function.__name__
+        if automatic:
+            from ghost_backend.linalg.refined_lu import requested_precision
+            if requested is not None and not isinstance(requested,dict):
+                raise ValueError('Execution settings must be an object.')
+            if inherited is None:
+                # Explicit old profiles and launch overrides retain their meaning.
+                base=from_environment()
+                if not os.environ.get('GHOST_CPU_FACTORIZATION','').strip():
+                    base['factorization']='adaptive'
+                requested=dict(base,**(requested or {}))
+            supplied.arguments['solver_method']='experimental_cpu' if requested_precision()=='double' else 'direct'
+            if requested_precision()!='double' and inherited is None and requested['factorization']=='adaptive':
+                requested['factorization']='dense'
+            if 'max_panels' in signature.parameters and 'max_panels' not in supplied.arguments:
+                supplied.arguments['max_panels']=100_000
+            args,kwargs=supplied.args,supplied.kwargs
+        fmm_requested=str(supplied.arguments.get('solver_method','')).strip().lower()=='fmm'
+        if fmm_requested:
+            if requested is not None and not isinstance(requested,dict):
+                raise ValueError('Execution settings must be an object.')
+            if requested is not None and requested.get('factorization','fmm')!='fmm':
+                raise ValueError('solver_method=fmm conflicts with the requested factorization.')
+            requested=dict(requested or inherited or {},factorization='fmm')
+            supplied.arguments['solver_method']='experimental_cpu'
+            args,kwargs=supplied.args,supplied.kwargs
         if requested is not None and inherited is not None and validate_options(requested) != inherited:
             raise ValueError('A nested solve must use the active execution settings.')
         value = requested if requested is not None else inherited
@@ -227,18 +289,61 @@ def configured_execution(function):
         selection = None
         requested_value = value
         if value['factorization'] == 'adaptive':
+            if 'cfie_alpha' in bound.arguments:
+                from ghost_backend.twod.solver import _validate_disabled_2d_cfie_alpha
+                _validate_disabled_2d_cfie_alpha(bound.arguments['cfie_alpha'])
             from ghost_backend.execution.selection import select_backend, current_batch_selection
             selection = current_batch_selection()
             if selection is None:
+                planning_start=time.perf_counter()
                 selection = select_backend(bound.arguments, value, certified='certified' in function.__name__)
+                selection['planning_seconds']=time.perf_counter()-planning_start
             value = dict(value, factorization=selection['selected'])
+        if bound.arguments.get('solver_method') == 'auto' and value['factorization'] in ('compressed','fmm'):
+            bound.arguments['solver_method']='experimental_cpu'
+            args,kwargs=bound.args,bound.kwargs
+        def invoke():
+            nonlocal value,selection
+            from ghost_backend.execution.errors import BackendNumericalError
+            from numpy.linalg import LinAlgError
+            failures=[]
+            modes=[value['factorization']]+(selection.get('retry_order',[]) if selection else [])
+            for index,mode in enumerate(modes):
+                value=dict(value,factorization=mode)
+                attempt_start=time.perf_counter()
+                try:
+                    with execution_scope(value):
+                        result=function(*args,**kwargs)
+                except (MemoryError,BackendNumericalError,LinAlgError) as exc:
+                    if selection is None or index == len(modes)-1:
+                        raise
+                    failures.append(dict(backend=mode,error=type(exc).__name__,message=str(exc),
+                                         wall_seconds=time.perf_counter()-attempt_start))
+                else:
+                    if failures:
+                        selection=dict(selection,initial_selection=selection['selected'],selected=mode,
+                                       failed_attempts=failures,reason='Selected after an admitted numerical/resource retry.')
+                    return result
+                # Exception tracebacks no longer own failed native workspaces.
+                import gc
+                gc.collect()
+            raise RuntimeError('Automatic backend retry exhausted.')
+
         with execution_scope(value, limit_blas=requested is not None and inherited is None):
-            result = function(*args, **kwargs)
+            result = invoke()
             if isinstance(result, dict):
-                result.setdefault('metadata', {})['execution_options'] = current_options()
+                result.setdefault('metadata', {})['execution_options'] = dict(value)
+                result['metadata']['execution_wall_seconds']=time.perf_counter()-execution_start
+                if allocated_memory_budget() is not None:
+                    result['metadata']['execution_memory_reservation_gib']=allocated_memory_budget()
+                if value['factorization']=='fmm':
+                    result['metadata']['solver_method']='galerkin_fmm_gmres'
+                    if fmm_requested:result['metadata']['solver_method_requested']='fmm'
                 if selection is not None:
                     result['metadata']['backend_selection'] = selection
                     result['metadata']['requested_execution_options'] = requested_value
+                if automatic:
+                    result['metadata']['solver_method_requested']='auto'
                 result['metadata']['execution_threads'] = dict(
                     assembly=effective_assembly_threads(), blas=current_options()['blas_threads'])
             return result

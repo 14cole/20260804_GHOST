@@ -8,6 +8,7 @@ import threading
 import numpy as np
 from ghost_backend.twod.assembly.compact import CompactOperator, scatter_operator_add
 from ghost_backend.linalg.workspace import first_nonfinite
+from ghost_backend.twod.assembly.separation import requires_adaptive, close_pairs
 
 
 from ghost_backend.twod.geometry import (
@@ -779,6 +780,10 @@ def _single_layer_block_linear(
         exact = _single_layer_self_block_exact(obs_elem, k0)
         if exact is not None:
             return exact
+    elif requires_adaptive(obs_elem, src_elem):
+        return _integrate_linear_pair_adaptive_sk(
+            obs_elem, src_elem, k0, False, max(16, obs_order), max(16, src_order),
+            compute_single_layer=True, compute_double_layer=False)[0]
     return _integrate_linear_pair_generic(
         obs_elem,
         src_elem,
@@ -851,7 +856,7 @@ def _sk_blocks_near_linear(
     adapt_order, _ = _near_singular_scheme(distance, scale)
     tensor_order = max(int(max(obs_order, src_order)), min(16, int(max(5, adapt_order))))
 
-    if distance / scale < 0.75:
+    if requires_adaptive(obs_elem, src_elem):
         return _integrate_linear_pair_adaptive_sk(
             obs_elem=obs_elem,
             src_elem=src_elem,
@@ -1827,7 +1832,7 @@ def _assemble_linear_operator_matrices_multi(
             continue
         distance = float(np.linalg.norm(obs_elem_eval.center - src_elem_eval.center))
         scale = max(obs_elem_eval.length, src_elem_eval.length, EPS)
-        if distance / scale < 0.75:
+        if requires_adaptive(obs_elem_eval, src_elem_eval):
             continue
         adapt_order, _ = _near_singular_scheme(distance, scale)
         tensor_order = max(
@@ -2095,6 +2100,8 @@ def _assemble_linear_hypersingular_matrix(
             centre_dist = np.sqrt(mdx * mdx + mdy * mdy)
             scale = np.maximum(np.maximum(obs_len[:, None], src_len[None, :]), EPS)
             batch_sym = (centre_dist / scale) >= 0.95
+            batch_sym &= ~close_pairs(p0_arr[obs_slice], p1_arr[obs_slice],
+                                      p0_arr[src_slice], p1_arr[src_slice], centre_dist, scale)
             batch_sym &= (
                 panel_index[obs_slice][:, None] != panel_index[src_slice][None, :]
             )

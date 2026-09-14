@@ -261,6 +261,7 @@ def _dense_backend_summary() -> 'Dict[str, Any]':
         "cpu_rhs_compression_requested": compression_mode(),
         "hierarchical_factors": unique_records('hierarchical'),
         "compressed_factors": unique_records('compressed'),
+        "fmm_factors": unique_records('fmm'),
         "sweep_compression": unique_records('sweep_compression'),
         "dense_condition_methods": sorted({row['condition_method'] for row in events if row.get('condition_method')}),
         "linear_backend": (
@@ -762,8 +763,8 @@ def _normalize_public_2d_solver_method(method: 'Any') -> 'str':
     normalized = str(method).strip().lower()
     if normalized == "fmm":
         raise ValueError(
-            "The FMM solver has been removed. Use solver_method='auto' or "
-            "'direct' for dense LU."
+            "Select FMM at a public monostatic entry point so its execution scope is established. "
+            "Private formulation helpers accept auto/direct only."
         )
     if normalized not in {"auto", "direct", EXPERIMENTAL_METHOD}:
         raise ValueError(
@@ -1200,6 +1201,13 @@ _MEMORY_LIMIT_FRACTION = 0.9
 
 
 def _solve_memory_limit_gb() -> 'float':
+    from ghost_backend.execution.options import allocated_memory_budget
+    limit=_configured_solve_memory_limit_gb()
+    allocation=allocated_memory_budget()
+    return min(limit,allocation) if allocation is not None else limit
+
+
+def _configured_solve_memory_limit_gb() -> 'float':
     override = environment_value("GHOST_MAX_SOLVE_GB", "").strip()
     if override:
         try:
@@ -1271,6 +1279,19 @@ def _estimate_memory_gb(
     gpu = factorization == 'dense' and (requested == 'gpu' or requested == 'auto' and d >= threshold)
     batch = count if gpu else min(configured_batch_size(), count)
     matrix = 16*d*d
+    from ghost_backend.linalg.refined_lu import requested_precision
+    if factorization == 'fmm':
+        if requested_precision()!='double' or requested=='gpu':
+            raise ValueError('FMM requires double precision and CPU execution.')
+        from ghost_backend.execution.options import option
+        from ghost_backend.compressed.runtime import storage_budget
+        # Conservative linear workspace allowance, plus the explicit near cap.
+        # Near assembly checks actual pair counts before allocating its matrices.
+        batch=min(batch,32)
+        peak=storage_budget()+16*d*(4*batch+option('fmm_restart',80)+2*option('fmm_recycle_vectors',12)+20)+32768*n*max(1,n_regions)+128*1024**2
+        plan=dict(method='fmm_workspace_allowance',peak_bytes=peak,unknowns=d,dense_matrix_bytes=0)
+        if dense_resources is not None:dense_resources['memory_estimate']=plan
+        return peak/1024**3
     if factorization == 'compressed':
         from ghost_backend.compressed.runtime import storage_budget
         from ghost_backend.linalg.refined_lu import requested_precision
@@ -1558,6 +1579,13 @@ def _solve_robin_bie(mesh, infos, pol, k0, elevations_deg, obs_order=8, src_orde
     from ghost_backend.twod.fields import solve_fields
     matrix, alpha, pec = _assemble_robin_bie_system(mesh, infos, pol, k0, obs_order, src_order,
                                                     operator_cache=operator_cache)
+    eta=getattr(matrix,'combined_field_eta',None)
+    if eta is not None:
+        return solve_fields(mesh,matrix,k0,elevations_deg,
+            lambda angles:_robin_bie_rhs_many(mesh,alpha,pec,pol,k0,angles),
+            condition_diagnostics,'PEC combined-field system',order=obs_order,
+            density_builder=lambda solution:eta*solution,second_potential='DLP',
+            second_density_builder=lambda solution:solution)[:3]
     return solve_fields(mesh, matrix, k0, elevations_deg,
         lambda angles: _robin_bie_rhs_many(mesh, alpha, pec, pol, k0, angles),
         condition_diagnostics, 'Robin-BIE IBC system', order=obs_order)[:3]
@@ -2483,6 +2511,7 @@ def solve_monostatic_rcs_2d_single_polarization(
     }
 
     if metadata.get('compressed_factors'):metadata['solver_method']='compressed_cpu'
+    if metadata.get('fmm_factors'):metadata['solver_method']='galerkin_fmm_gmres'
     metadata["amplitude_version"] = RCS_AMPLITUDE_VERSION
     quality_gate = evaluate_quality_gate(metadata, thresholds=quality_thresholds)
     metadata["quality_gate"] = quality_gate
@@ -2726,6 +2755,7 @@ def _merge_co_polarized_2d_results(
         "channel_metadata": channel_metadata,
         "cpu_factorization_requested": first_metadata.get('cpu_factorization_requested', 'dense'),
         "compressed_factors": [v for m in channel_metadata.values() for v in m.get('compressed_factors',[])],
+        "fmm_factors": [v for m in channel_metadata.values() for v in m.get('fmm_factors',[])],
         "cpu_rhs_compression_requested": first_metadata.get('cpu_rhs_compression_requested', 'auto'),
         "hierarchical_factors": {label: channel_metadata[label].get('hierarchical_factors', []) for label in expected_channels},
         "sweep_compression": {label: channel_metadata[label].get('sweep_compression', []) for label in expected_channels},
@@ -2957,7 +2987,7 @@ def solve_monostatic_rcs_2d(
     mesh_reference_ghz: 'Optional[float]' = None,
     rcs_normalization_mode: 'str' = RCS_NORM_MODE_DEFAULT,
     abort_event: 'Optional[threading.Event]' = None,
-    solver_method: 'str' = "direct",
+    solver_method: 'str' = "auto",
 ) -> 'Dict[str, Any]':
     """Solve the complete 2-D monostatic co-polarized response.
 
@@ -3688,7 +3718,7 @@ def solve_monostatic_rcs_2d_certified(
     mesh_reference_ghz: 'Optional[float]' = None,
     rcs_normalization_mode: 'str' = RCS_NORM_MODE_DEFAULT,
     abort_event: 'Optional[threading.Event]' = None,
-    solver_method: 'str' = "direct",
+    solver_method: 'str' = "auto",
 ) -> 'Dict[str, Any]':
     """Canonical production monostatic entry; both channels must certify."""
 
@@ -3740,7 +3770,7 @@ def solve_monostatic_rcs_2d_survey(
     mesh_reference_ghz: 'Optional[float]' = None,
     rcs_normalization_mode: 'str' = RCS_NORM_MODE_DEFAULT,
     abort_event: 'Optional[threading.Event]' = None,
-    solver_method: 'str' = "direct",
+    solver_method: 'str' = "auto",
 ) -> 'Dict[str, Any]':
     """Co-polarized single-mesh survey with explicit non-certification."""
 

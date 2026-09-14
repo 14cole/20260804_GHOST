@@ -17,9 +17,13 @@ from ghost_backend.execution.provenance import backend_source_inventory, backend
 class PackageLayoutTests(unittest.TestCase):
     def test_top_level_contains_launcher_guides_and_categorized_backend(self):
         ghost = BACKEND.parent
-        entries = list(ghost.iterdir())
-        self.assertEqual({p.name for p in entries if p.is_dir()}, {'ghost_backend'})
-        self.assertTrue(all(p.suffix in ('.bat', '.md') for p in entries if p.is_file()))
+        entries = [p for p in ghost.iterdir()
+                   if p.name not in {'.pytest_cache', '__pycache__', 'build', 'dist'}
+                   and not p.name.endswith('.egg-info')]
+        self.assertEqual({p.name for p in entries if p.is_dir()}, {'ghost_backend', 'scripts'})
+        self.assertTrue(all(p.suffix in ('.bat', '.md') or p.name == 'pyproject.toml'
+                            for p in entries if p.is_file()))
+        self.assertTrue((ghost / 'scripts/check_headless.py').is_file())
         self.assertFalse((ghost / '1c_build_deltas').exists())
         self.assertFalse((BACKEND / 'ghost_backend').exists())
         self.assertFalse((BACKEND / 'solver').exists())

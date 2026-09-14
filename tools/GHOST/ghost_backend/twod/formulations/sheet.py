@@ -5,6 +5,10 @@ from ghost_backend.twod.assembly.mass import add_mass
 
 def assemble_system(mesh, infos, pol, k0, obs_order=8, src_order=8):
     import ghost_backend.twod.solver as rcs
+    from ghost_backend.twod.fmm.runtime import enabled as fmm_enabled, native as fmm_native
+    if fmm_enabled():
+        operator,oracle=fmm_native(mesh,infos,pol,k0,'sheet',obs_order,src_order)
+        return operator,oracle.endpoints
     from ghost_backend.compressed.runtime import enabled, native
     if enabled():
         operator,oracle=native(mesh,infos,pol,k0,'sheet',obs_order,src_order)

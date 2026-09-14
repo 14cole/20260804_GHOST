@@ -213,7 +213,7 @@ _CONFIG_KIND = '2d'
 # Legacy custom profiles remain supported by --config and old request bundles.
 # For direct edits to these aliases, set SOLVE_PRESET="custom". Named presets
 # use ADVANCED_OVERRIDES for execution settings and MAX_SOLVE_GB for RAM.
-SOLVER_METHOD = "experimental_cpu"
+SOLVER_METHOD = "auto"
 LU_PRECISION = "double"
 BLAS_THREADS_PER_WORKER = efficient_defaults()['blas_threads']
 ASSEMBLY_THREADS = efficient_defaults()['assembly_threads']
@@ -1075,7 +1075,7 @@ def worker(run_dir_str, submission_index, task_index):
         from ghost_backend.runs.batch import apply_batch_choices
         records = json.loads((run_dir / 'schedule.json').read_text())['units']
         if any('backend_candidates' not in r for r in records):
-            raise ValueError('Automatic batch selection requires dense/compressed forecasts; regenerate the run.')
+            raise ValueError('Automatic batch selection requires backend forecasts; regenerate the run.')
         for share in (planned_units, steal_units):
             names = {_unit_name(u) for u in share if not _unit_output_path(run_dir, u).is_file()}
             resolved, selections, summary = apply_batch_choices(

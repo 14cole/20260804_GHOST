@@ -132,7 +132,7 @@ _CONFIG_KIND = '2d'
 # Legacy custom profiles remain supported by --config and old request bundles.
 # For direct edits to these aliases, set SOLVE_PRESET="custom". Named presets
 # use ADVANCED_OVERRIDES for execution settings and MAX_SOLVE_GB for RAM.
-SOLVER_METHOD = "experimental_cpu"
+SOLVER_METHOD = "auto"
 LU_PRECISION = "double"
 BLAS_THREADS_PER_WORKER = efficient_defaults()['blas_threads']
 ASSEMBLY_THREADS = efficient_defaults()['assembly_threads']

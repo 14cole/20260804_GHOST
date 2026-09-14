@@ -1,4 +1,6 @@
-# Headless GHOST only: tested CPython 3.6.8 dependency profile.
+# HISTORICAL: applies only to solver revisions before the automatic FMM update.
+# Current GHOST requires Python 3.10+ and requirements/hpc.txt.
+# Original tested CPython 3.6.8 dependency profile:
 # dataclasses and threadpoolctl are bundled in ghost_backend/execution.
 numpy==1.14.3
 scipy==1.0.0

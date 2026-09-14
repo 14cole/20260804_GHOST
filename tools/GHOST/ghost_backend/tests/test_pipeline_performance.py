@@ -92,9 +92,15 @@ class PipelinePerformanceTests(unittest.TestCase):
         self.assertEqual(len(plan['meshes']),8)
         self.assertGreater(max(r['unknowns'] for r in plan['meshes'] if r['phase']=='fine'),
                            max(r['unknowns'] for r in plan['meshes'] if r['phase']=='base'))
-        with preparation_scope(), mock.patch.object(solver,'_solve_memory_limit_gb',return_value=.001):
+        compressed_budget = (plan['candidates']['dense']['peak_gb'] +
+                             plan['candidates']['compressed']['peak_gb']) / 2
+        self.assertLess(plan['candidates']['compressed']['peak_gb'], compressed_budget)
+        with preparation_scope(), mock.patch.object(solver,'_solve_memory_limit_gb',return_value=compressed_budget):
             plan = select_backend(args(), validate_options(dict(factorization='adaptive')), certified=True)
         self.assertEqual(plan['selected'],'compressed')
+        with preparation_scope(), mock.patch.object(solver,'_solve_memory_limit_gb',return_value=.001):
+            with self.assertRaisesRegex(MemoryError, 'No compatible backend fits'):
+                select_backend(args(), validate_options(dict(factorization='adaptive')), certified=True)
         with mock.patch('ghost_backend.execution.selection.select_backend',side_effect=AssertionError('manual changed')):
             solver.solve_monostatic_rcs_2d_survey(**dict(args(),frequencies_ghz=[.6]), execution_options=dict(factorization='dense'))
 
@@ -207,7 +213,7 @@ class PipelinePerformanceTests(unittest.TestCase):
                         plan=predict_2d_resources_many(str(path),[.6],['VV','HH'],'meters',10000,
                             fine_factor=1.5,n_angles=3,solver_method='experimental_cpu')
                 memory.assert_not_called()
-                self.assertTrue(all(set(r['backend_candidates']) == {'dense', 'compressed'} for r in plan.values()))
+                self.assertTrue(all(set(r['backend_candidates']) == {'dense', 'compressed', 'fmm'} for r in plan.values()))
                 self.assertTrue(all(r['peak_gb']>0 and r['fine_nodes']>r['nodes'] for r in plan.values()))
                 forecasts.append(plan)
             self.assertEqual(forecasts[0], forecasts[1])

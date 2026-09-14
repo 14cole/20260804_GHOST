@@ -1,5 +1,6 @@
 """Checked HODLR inverse with exact-matrix residual refinement."""
 from ghost_backend.execution.options import environment_value
+from ghost_backend.execution.errors import BackendNumericalError
 import os
 import warnings
 import numpy as np
@@ -7,14 +8,14 @@ import scipy.linalg as la
 from ghost_backend.linalg.workspace import matrix_inf_norm
 
 
-class HierarchicalRejected(RuntimeError):
+class HierarchicalRejected(BackendNumericalError):
     pass
 
 
 def factor_mode():
     value = environment_value('GHOST_CPU_FACTORIZATION', 'dense').strip().lower()
-    if value not in ('dense', 'hierarchical', 'auto', 'compressed'):
-        raise ValueError('GHOST_CPU_FACTORIZATION must be dense, hierarchical, auto, or compressed.')
+    if value not in ('dense', 'hierarchical', 'auto', 'compressed', 'fmm'):
+        raise ValueError('GHOST_CPU_FACTORIZATION must be dense, hierarchical, auto, compressed, or fmm.')
     return value
 
 

@@ -14,8 +14,8 @@ def main():
     print('Python: {} ({})'.format(platform.python_version(), sys.executable))
     print('Compiler: {}'.format(platform.python_compiler()))
     print('Backend: {}'.format(Path(__file__).resolve().parents[1]))
-    if sys.version_info < (3, 6, 8):
-        print('FAIL: the headless backend requires Python 3.6.8 or newer.')
+    if sys.version_info < (3, 10):
+        print('FAIL: this solver package requires Python 3.10 or newer.')
         return 1
     try:
         import numpy as np
@@ -28,12 +28,12 @@ def main():
         print('Bundled threadpoolctl: {} ({})'.format(
             thread_control.__version__, thread_control.implementation.__file__))
         for name, version, minimum in (
-            ('NumPy', np.__version__, (1, 14, 3)),
-            ('SciPy', scipy.__version__, (1, 0, 0)),
+            ('NumPy', np.__version__, (2, 0, 0)),
+            ('SciPy', scipy.__version__, (1, 14, 0)),
         ):
             numbers = tuple(int(part) for part in version.split('.')[:3])
             if numbers < minimum:
-                raise RuntimeError('{} {} is older than the tested HPC minimum {}'.format(
+                raise RuntimeError('{} {} is older than the required HPC minimum {}'.format(
                     name, version, '.'.join(str(part) for part in minimum)))
         print('dataclasses: {}'.format(ghost_runtime.dataclass.__module__))
         try:
@@ -57,6 +57,9 @@ def main():
         if not np.isfinite(residual) or residual > 1e-12:
             raise RuntimeError('Complex LU check failed: residual {}'.format(residual))
         print('PASS: driver/solver imports and complex LU (residual {:.3g}).'.format(residual))
+        from ghost_backend.execution.policy import native_fmm_available
+        print('Automatic FMM candidate: {}.'.format('available' if native_fmm_available() else
+              'unavailable; automatic selection uses dense/compressed'))
     except Exception as exc:
         print('FAIL: {}: {}'.format(type(exc).__name__, exc))
         return 1
