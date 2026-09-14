@@ -1,6 +1,6 @@
-"""P1 Galerkin operators: point FMM plus sparse accurate near corrections.
+"""Polynomial Galerkin operators: point FMM plus accurate near corrections.
 
-Corrections live on panel endpoint incidences, preserving discontinuous material
+Corrections live on panel basis incidences, preserving discontinuous material
 weights and source masks even at shared nodes. No dense global operator is built.
 """
 import numpy as np
@@ -9,6 +9,7 @@ from scipy.spatial import cKDTree
 from scipy.special import hankel2
 from ghost_backend.twod.assembly.geometry_plan import AssemblyGeometry
 from ghost_backend.twod.fmm.kernel import evaluate, NativePlan
+from ghost_backend.twod.basis import values, derivative_matrix
 
 
 def near_pairs(geometry, budget, count_only=False):
@@ -31,7 +32,7 @@ def near_pairs(geometry, budget, count_only=False):
                 js = js[keep]
                 count += len(js)
                 # All three primitives, accurate blocks, COO/CSR construction.
-                if count*2304 > budget:
+                if count*576*geometry.node_ids.shape[1]**2 > budget:
                     raise MemoryError('FMM near interactions exceed the configured storage budget.')
                 if not count_only:pairs.extend((i,int(j)) for j in js)
     return count if count_only else pairs
@@ -45,20 +46,21 @@ class GalerkinKernel:
         self.geometry = geometry or AssemblyGeometry(mesh)
         g=self.geometry
         if not len(g.lengths) or np.any(g.lengths<=0): raise ValueError('FMM needs nondegenerate panels.')
-        self.n=len(mesh.nodes);self.m=len(g.lengths)
+        self.n=len(mesh.nodes);self.m=len(g.lengths);self.width=g.node_ids.shape[1]
         self.order=max(8,int(order),int(np.ceil(abs(k)*g.lengths.max()/2))+4)
         if self.order>64: raise ValueError('FMM quadrature needs a finer mesh (order exceeds 64).')
-        if 64*self.m*self.order>budget or pairs is not None and len(pairs)*2304>budget:
+        if 64*self.m*self.order>budget or pairs is not None and len(pairs)*576*self.width**2>budget:
             raise MemoryError('FMM geometry and near workspace exceed the configured storage budget.')
         t,w=np.polynomial.legendre.leggauss(self.order);t=(t+1)/2;w=w/2
-        self.phi=np.stack((1-t,t),axis=1)
+        self.phi=values(t,self.width-1)
+        self.dphi=values(t,self.width-1,True)
         self.points=(g.p0[:,None]+t[None,:,None]*g.segments[:,None]).reshape(-1,2)
         self.native_plan=NativePlan(self.points,self.k,self.eps)
         self.points=self.native_plan.points
         self.weights=(g.lengths[:,None]*w).ravel()
         self.normals=np.repeat(g.normals,self.order,axis=0)
         self.ids=g.node_ids.ravel()
-        self.P=coo_matrix((np.ones(2*self.m),(np.arange(2*self.m),self.ids)),shape=(2*self.m,self.n)).tocsr()
+        self.P=coo_matrix((np.ones(self.width*self.m),(np.arange(self.width*self.m),self.ids)),shape=(self.width*self.m,self.n)).tocsr()
         self.pairs=near_pairs(g,budget) if pairs is None else pairs
         self.correction={};self.near={};self.calls=0
         self._build()
@@ -67,12 +69,12 @@ class GalerkinKernel:
         from ghost_backend.twod.operators import _sk_blocks_near_linear
         rr=[];cc=[];delta={kind:[] for kind in ('S','KP','W')};exact={kind:[] for kind in delta}
         g=self.geometry;q=self.order;p=self.phi
-        tangent=np.array([[1.,-1.],[-1.,1.]])
+        derivative=derivative_matrix(self.width-1)
         points=self.points.reshape(self.m,q,2);weights=self.weights.reshape(self.m,q)
         def append(i,j,s,kp,bs,bkp):
             normal=np.dot(g.normals[i],g.normals[j])
-            maue=lambda b: -self.k**2*normal*b+tangent*b.sum()/(g.lengths[i]*g.lengths[j])
-            rr.extend([2*i,2*i,2*i+1,2*i+1]);cc.extend([2*j,2*j+1,2*j,2*j+1])
+            maue=lambda b: -self.k**2*normal*b+derivative.T@b@derivative/(g.lengths[i]*g.lengths[j])
+            rr.extend(np.repeat(self.width*i+np.arange(self.width),self.width));cc.extend(np.tile(self.width*j+np.arange(self.width),self.width))
             for kind,a,b in (('S',s,bs),('KP',kp,bkp),('W',maue(s),maue(bs))):
                 delta[kind].extend((a-b).ravel());exact[kind].extend(a.ravel())
         for num,(i,j) in enumerate(self.pairs):
@@ -93,30 +95,30 @@ class GalerkinKernel:
                 bkp_reverse=p.T@(-h.T*np.einsum('ijc,c->ij',difference.transpose(1,0,2),g.normals[j])*weight.T)@p
                 append(j,i,s.T,kp_reverse,bs.T,bkp_reverse)
         for kind in delta:
-            self.correction[kind]=coo_matrix((delta[kind],(rr,cc)),shape=(2*self.m,2*self.m)).tocsr()
-            self.near[kind]=coo_matrix((exact[kind],(rr,cc)),shape=(2*self.m,2*self.m)).tocsr()
+            self.correction[kind]=coo_matrix((delta[kind],(rr,cc)),shape=(self.width*self.m,self.width*self.m)).tocsr()
+            self.near[kind]=coo_matrix((exact[kind],(rr,cc)),shape=(self.width*self.m,self.width*self.m)).tocsr()
         self.correction['K']=self.correction['KP'].T.tocsr()
         self.near['K']=self.near['KP'].T.tocsr()
 
     def _project(self, y, coefficient, derivative=False):
         y=y.reshape(self.m,self.order,-1)*self.weights.reshape(self.m,self.order,1)
         if derivative:
-            out=y.sum(axis=1)[:,None,:]*np.array([-1.,1.])[None,:,None]/self.geometry.lengths[:,None,None]
+            out=np.einsum('qa,eqr->ear',self.dphi,y)/self.geometry.lengths[:,None,None]
         else: out=np.einsum('qa,eqr->ear',self.phi,y)
         if coefficient is not None:out*=np.asarray(coefficient)[:,None,None]
-        return self.P.T@out.reshape(2*self.m,-1)
+        return self.P.T@out.reshape(self.width*self.m,-1)
 
     def apply(self, kind, x, source_mask=None, coefficient=None):
         self.checkpoint();self.calls+=1
         x=np.asarray(x,complex);vector=x.ndim==1
         if vector:x=x[:,None]
-        local=(self.P@x).reshape(self.m,2,-1)
+        local=(self.P@x).reshape(self.m,self.width,-1)
         if source_mask is not None:local*=np.asarray(source_mask)[:,None,None]
         density=np.einsum('qa,ear->eqr',self.phi,local).reshape(self.m*self.order,-1)
         strengths=self.weights[:,None]*density
         if kind=='W':
-            derivative=(local[:,1]-local[:,0])/self.geometry.lengths[:,None]
-            d=np.repeat(derivative,self.order,axis=0)*self.weights[:,None]
+            derivative=np.einsum('qa,ear->eqr',self.dphi,local)/self.geometry.lengths[:,None,None]
+            d=derivative.reshape(len(self.points),-1)*self.weights[:,None]
             strength=np.column_stack((d,strengths*self.normals[:,0,None],strengths*self.normals[:,1,None]))
             value,_=evaluate(self.points,self.k,strength,eps=self.eps,threads=self.threads,plan=self.native_plan)
             d,nx,ny=np.split(value,3,axis=1)
@@ -128,8 +130,8 @@ class GalerkinKernel:
                 gradient=kind=='KP',eps=self.eps,threads=self.threads,plan=self.native_plan)
             if kind=='KP':value=np.einsum('qcr,qc->qr',gradient,self.normals)
             y=self._project(value,coefficient)
-        corr=self.correction[kind]@local.reshape(2*self.m,-1)
-        if coefficient is not None:corr*=np.repeat(coefficient,2)[:,None]
+        corr=self.correction[kind]@local.reshape(self.width*self.m,-1)
+        if coefficient is not None:corr*=np.repeat(coefficient,self.width)[:,None]
         y+=self.P.T@corr
         return y[:,0] if vector else y
 
@@ -143,7 +145,7 @@ class GalerkinKernel:
         for kind,x,mask,coefficient in requests:
             x=np.asarray(x,complex);vector=x.ndim==1
             if vector:x=x[:,None]
-            local=(self.P@x).reshape(self.m,2,-1)
+            local=(self.P@x).reshape(self.m,self.width,-1)
             if mask is not None:local*=np.asarray(mask)[:,None,None]
             key=('S' if kind=='KP' else kind,local.shape)
             candidates=groups.setdefault(key,[])
@@ -152,8 +154,8 @@ class GalerkinKernel:
                 density=np.einsum('qa,ear->eqr',self.phi,local).reshape(len(self.points),-1)
                 strength=self.weights[:,None]*density
                 if kind=='W':
-                    derivative=(local[:,1]-local[:,0])/self.geometry.lengths[:,None]
-                    d=np.repeat(derivative,self.order,axis=0)*self.weights[:,None]
+                    derivative=np.einsum('qa,ear->eqr',self.dphi,local)/self.geometry.lengths[:,None,None]
+                    d=derivative.reshape(len(self.points),-1)*self.weights[:,None]
                     strength=np.column_stack((d,strength*self.normals[:,0,None],strength*self.normals[:,1,None]))
                 count=strength.shape[1]
                 charges.append(np.zeros_like(strength) if kind=='K' else strength)
@@ -171,16 +173,16 @@ class GalerkinKernel:
                 d,nx,ny=np.split(v,3,axis=1)
                 y=self._project(d,coefficient,True)-self.k**2*self._project(nx*self.normals[:,0,None]+ny*self.normals[:,1,None],coefficient)
             else:y=self._project(v,coefficient)
-            correction=self.correction[kind]@local.reshape(2*self.m,-1)
-            if coefficient is not None:correction*=np.repeat(coefficient,2)[:,None]
+            correction=self.correction[kind]@local.reshape(self.width*self.m,-1)
+            if coefficient is not None:correction*=np.repeat(coefficient,self.width)[:,None]
             y+=self.P.T@correction
             results.append(y[:,0] if vector else y)
         return results
 
     def sparse(self, kind, source_mask=None, coefficient=None):
         a=self.near[kind]
-        if source_mask is not None:a=a.multiply(np.repeat(source_mask,2)[None,:])
-        if coefficient is not None:a=a.multiply(np.repeat(coefficient,2)[:,None])
+        if source_mask is not None:a=a.multiply(np.repeat(source_mask,self.width)[None,:])
+        if coefficient is not None:a=a.multiply(np.repeat(coefficient,self.width)[:,None])
         return (self.P.T@a@self.P).tocsr()
 
     @property

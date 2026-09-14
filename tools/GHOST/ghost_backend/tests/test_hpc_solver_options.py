@@ -237,7 +237,7 @@ assert study_template()['cases']
         from ghost_backend.execution.options import validate_options
         self._run_material_case('2d', BACKEND / "validation" /
             'pec_backed_ibc/example/2d_outer_envelope.geo', certified=False, environment_profile=True,
-            execution=validate_options(dict(factorization='compressed', compressed_storage_mib=64,
+            execution=validate_options(dict(factorization='compressed', mesh_strategy='adaptive', compressed_storage_mib=64,
                 assembly_threads='auto', blas_threads=1, rhs_compression='on', angle_batch_size=17)))
 
     def test_freddy_coating_bor_tight_worker(self):

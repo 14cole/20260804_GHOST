@@ -1495,7 +1495,8 @@ class SolverTab(RunSetupMixin, QWidget):
         self.cmb_solver_method.setEnabled(not busy and method_available and factor not in ('compressed', 'adaptive','fmm'))
         self.execution_options_widget.mesh_combo.setEnabled(not busy and method_available)
         if not is_bor and not method_available:
-            self.execution_options_widget.mesh_combo.setCurrentIndex(0)
+            combo = self.execution_options_widget.mesh_combo
+            combo.setCurrentIndex(combo.findData('global'))
         self.cmb_lu_precision.setEnabled(not busy and not experimental and factor == 'dense')
         self.btn_advanced_settings.setEnabled(not busy)
         self.edit_quality_residual_max.setEnabled(enable_2d_quality_thresholds)

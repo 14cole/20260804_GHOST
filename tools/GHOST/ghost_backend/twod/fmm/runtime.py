@@ -50,7 +50,8 @@ def native(mesh,infos,pol,k0,kind,obs_order=8,src_order=8):
     n=oracle.nn;mass=oracle.mass;ids=np.arange(n);f=kernel(mesh,k0,max(obs_order,src_order))
     if kind=='robin':
         if pol=='TM' and np.all(oracle.pec_nodes) and option('fmm_pec_cfie',False):
-            degree=np.bincount(f.ids,minlength=n)
+            endpoints=f.geometry.node_ids[:,:2].ravel()
+            degree=np.bincount(endpoints,minlength=n)[np.unique(endpoints)]
             if np.any(degree!=2):raise ValueError('FMM PEC combined field requires closed contours.')
             # Internal GHOST normals point into a PEC body. The exterior DLP
             # trace is therefore +M/2+K for G=i H0^(2)/4.

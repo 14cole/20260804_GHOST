@@ -61,9 +61,10 @@ class ExecutionOptionsWidget(QGroupBox):
         layout.addWidget(browse)
         form.addRow('Temporary disk directory', row)
         self.mesh_combo = QComboBox()
+        self.mesh_combo.addItem('Automatic adaptive accuracy (recommended)', 'adaptive')
         self.mesh_combo.addItem('Global material wavelength', 'global')
         self.mesh_combo.addItem('Local material sizing (experimental)', 'local')
-        self.mesh_combo.setToolTip('Global uses the shortest relevant material wavelength. Local can reduce unknowns on less demanding material segments while protecting corners, junctions and nearby boundaries. Keep certification enabled; failed local convergence retries global sizing.')
+        self.mesh_combo.setToolTip('Automatic tests higher-order fields and refines difficult regions while preserving the input geometry and accuracy gates. Certification is required for adaptive selection; survey runs keep the reference mesh. Global and Local retain the linear mesh as expert overrides.')
         form.addRow('Mesh sizing', self.mesh_combo)
         self.rhs_combo = QComboBox()
         for label, value in [('Automatic', 'auto'), ('Disabled', 'off'), ('Enabled', 'on')]:

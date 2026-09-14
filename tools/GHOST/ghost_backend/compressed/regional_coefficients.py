@@ -4,6 +4,7 @@ import ghost_backend.twod.solver as rcs
 import ghost_backend.twod.formulations.regions as mr
 import ghost_backend.twod.assembly.scatter as ss
 from scipy.sparse import coo_matrix
+from ghost_backend.twod.basis import integral_bounds
 from ghost_backend.twod.assembly.geometry_plan import AssemblyGeometry
 from ghost_backend.twod.assembly.compact import CompactOperator
 
@@ -41,11 +42,11 @@ class PreparedOracle:
         self.xy=np.zeros((nn,2));self.radius=np.zeros(nn)
         self.mass=np.zeros(nn);self.normal_mass=np.zeros(nn)
         for e in mesh.elements:
-            for node,point in zip(e.node_ids,(e.p0,e.p1)):
+            for node,point,bound in zip(e.node_ids, (mesh.nodes[i].xy for i in e.node_ids), integral_bounds(e)):
                 self.xy[node]=point
                 self.radius[node]=max(self.radius[node],e.length)
-                self.mass[node]+=e.length*.5
-                self.normal_mass[node]+=e.length*.5*np.linalg.norm(e.normal)
+                self.mass[node]+=bound
+                self.normal_mass[node]+=bound*np.linalg.norm(e.normal)
         self.groups=[]
         for k,requests in mr.operator_plan(self.layout):
             templates=ss.multi_outputs(None,mesh,self.layout,k,requests)
@@ -56,9 +57,9 @@ class PreparedOracle:
                     self.layout['ifaces'][request['observer']]['robin_alpha_elements'])
                 source_mass=np.zeros(nn);weighted_mass=np.zeros(nn)
                 for j,e in enumerate(mesh.elements):
-                    if source[j]:np.add.at(source_mass,np.asarray(e.node_ids),e.length*.5)
+                    if source[j]:np.add.at(source_mass,np.asarray(e.node_ids),integral_bounds(e))
                     weight=1 if coefficient is None else abs(coefficient[j])
-                    np.add.at(weighted_mass,np.asarray(e.node_ids),weight*e.length*.5)
+                    np.add.at(weighted_mass,np.asarray(e.node_ids),weight*integral_bounds(e))
                 prepared.append((request,template,source,coefficient,source_mass,weighted_mass))
             self.groups.append((k,prepared))
 

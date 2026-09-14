@@ -108,7 +108,8 @@ def storage_resources(mesh, layout):
                 if request['source'] in sources and layout['region_props'][rid]['k'] == k)
             map_bytes += 56*n*route_count
 
-    mass_bytes = 160 * len(mesh.elements) + 8 * (n + 1)
+    width = len(mesh.elements[0].node_ids) if mesh.elements else 2
+    mass_bytes = 40*width*width * len(mesh.elements) + 8 * (n + 1)
     max_interface = max((i['n'] for i in layout['ifaces']), default=0)
     block_bytes = 16 * BLOCK_ROWS * max_interface * 12
 
@@ -131,7 +132,7 @@ def storage_resources(mesh, layout):
 
     near_batch_samples = min(ops._NEAR_BATCH_MAX_SAMPLES, near_pairs * 16 * 16)
     near_batch_bytes = near_batch_samples * 256
-    assembly_workspace = 1024 * near_pairs + max(tile_bytes, near_batch_bytes)
+    assembly_workspace = 256*width*width * near_pairs + max(tile_bytes, near_batch_bytes)
 
 
     return dict(operator_matrices=matrices, operator_entries=entries,
@@ -143,12 +144,8 @@ def storage_resources(mesh, layout):
 
 
 def _sparse_mass(mesh):
-    ids = np.asarray([e.node_ids for e in mesh.elements], dtype=int)
-    lengths = np.asarray([e.length for e in mesh.elements])
-    rows = np.repeat(ids, 2, axis=1).reshape(-1)
-    cols = np.tile(ids, (1, 2)).reshape(-1)
-    values = (lengths[:, None] * np.asarray([1/3, 1/6, 1/6, 1/3])[None, :]).reshape(-1)
-    return coo_matrix((values, (rows, cols)), shape=(len(mesh.nodes), len(mesh.nodes))).tocsr()
+    from ghost_backend.twod.assembly.mass import sparse_mass
+    return sparse_mass(mesh)
 
 
 def _assemble_system_fresh(mesh, infos, pol, obs_order=8, src_order=8):
@@ -418,7 +415,7 @@ def exterior_projection(mesh, layout):
 def dof_coordinates(mesh, layout):
     xy = np.zeros((len(mesh.nodes), 2))
     for element in mesh.elements:
-        xy[element.node_ids[0]], xy[element.node_ids[1]] = element.p0, element.p1
+        xy[list(element.node_ids)] = [mesh.nodes[i].xy for i in element.node_ids]
     result = np.empty((layout['n_dof'], 2))
     for (mi, side), (offset, count) in layout['dof_map'].items():
         result[offset:offset+count] = xy[layout['ifaces'][mi]['nodes']]

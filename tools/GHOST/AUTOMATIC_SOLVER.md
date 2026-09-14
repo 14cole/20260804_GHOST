@@ -9,7 +9,7 @@ explicit profiles retain their recorded settings.
 ## What is selected
 
 Automatic compares compatible dense LU, compressed, and FMM implementations of
-the same piecewise-linear Galerkin equations. FMM accelerates the interaction
+the same Galerkin equations on the selected polynomial mesh. FMM accelerates the interaction
 operator; it does not replace Galerkin. Geometry, material formulations, angle
 count, certification meshes, available memory, and estimated computation cost
 enter the decision. HPC makes its scheduling choice on the execution node and
@@ -30,6 +30,9 @@ time including planning and retries.
 
 ## Implemented numerical and performance work
 
+- Adaptive quadratic/cubic basis functions with graded and locally refined
+  panels, strict full-field convergence checks and a linear reference fallback.
+  See [adaptive mesh details and measurements](ADAPTIVE_MESH.md).
 - Corrected close-interaction quadrature, including separated panels with a
   small gap; geometry-aware spatial filtering retains the supplied geometry.
 - Native FMM Galerkin operators with near-interaction corrections and memory
@@ -122,7 +125,7 @@ The follow-up update adds selective spatial coarse correction, exact-request
 timing evidence, itemized FMM memory allowances, fewer native routing copies,
 and normalization of NumPy angle-array inputs. Remaining work includes broader
 multilevel preconditioning and hardware calibration, further translation reuse,
-adaptive high-order methods for arbitrary corners/gaps, additional material
+rigorous adaptive error estimators and variable local polynomial degrees, additional material
 couplings, independent material-junction validation and real Linux/HPC runs.
 The current solver should not be described as a fully qualified industrial
 solver across the entire 1-20 GHz and 10-20 ft geometry range.

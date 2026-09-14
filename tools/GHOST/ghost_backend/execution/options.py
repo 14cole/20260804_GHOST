@@ -16,6 +16,7 @@ DEFAULTS = {
     'version': 1,
     'factorization': 'dense',
     'mesh_strategy': 'global',
+    'basis_order': 1,
     'compressed_storage_mib': 2048,
     'ram_budget_gib': None,
     'temporary_directory': '',
@@ -33,13 +34,19 @@ DEFAULTS = {
     'fmm_recycle_vectors': 12,
     'fmm_pec_cfie': False,
 }
-EFFICIENT_DEFAULTS = dict(DEFAULTS, factorization='adaptive', compressed_storage_mib=2048,
+EFFICIENT_DEFAULTS = dict(DEFAULTS, factorization='adaptive', mesh_strategy='adaptive', compressed_storage_mib=2048,
                           assembly_threads=4, blas_threads=2)
 _ACTIVE = ScopedValue('ghost_execution_options', default=None)
 _ASSEMBLY_ALLOCATION = ScopedValue('ghost_assembly_allocation', default=None)
 _MEMORY_ALLOCATION = ScopedValue('ghost_memory_allocation', default=None)
 _BLAS_LOCK = threading.RLock()
 _PUBLIC_DEPTH = ScopedValue('ghost_public_execution_depth',default=0)
+_AUTOMATIC_REQUEST = ScopedValue('ghost_automatic_backend_request', default=False)
+
+
+def automatic_backend_requested():
+    return _AUTOMATIC_REQUEST.get()
+
 _ENV_FIELDS = {
     'GHOST_CPU_FACTORIZATION': 'factorization',
     'GHOST_COMPRESSED_STORAGE_MIB': 'compressed_storage_mib',
@@ -68,8 +75,10 @@ def validate_options(value):
             raise ValueError('{} must be finite and between 1e-13 and 1e-5.'.format(key))
     if result['fmm_tolerance']>result['fmm_solver_tolerance']:
         raise ValueError('FMM kernel tolerance must not exceed solver tolerance.')
-    if result['mesh_strategy'] not in ('global', 'local'):
-        raise ValueError('Mesh strategy must be global or local.')
+    if type(result['basis_order']) is not int or result['basis_order'] not in (1, 2, 3):
+        raise ValueError('Boundary polynomial degree must be 1, 2 or 3.')
+    if result['mesh_strategy'] not in ('global', 'local', 'adaptive'):
+        raise ValueError('Mesh strategy must be global, local or adaptive.')
     if result['rhs_compression'] not in ('off', 'auto', 'on'):
         raise ValueError('RHS compression must be off, auto, or on.')
     for key, lower, upper in [('compressed_storage_mib', 16, 1048576),
@@ -111,6 +120,7 @@ def efficient_defaults():
 def geometry_preset(name):
     """Return 2D monostatic performance settings without changing mesh accuracy."""
     values = efficient_defaults()
+    if name != 'adaptive': values['mesh_strategy'] = 'global'
     if name == 'small':
         values.update(factorization='dense', rhs_compression='off')
         method = 'direct'
@@ -190,6 +200,8 @@ def environment_value(name, default=''):
 def validate_for_run(options, method='direct', precision='double', scattering='monostatic', kind='2d'):
     value = validate_options(options)
     mode = value['factorization']
+    if (value['mesh_strategy']=='adaptive' or value['basis_order']>1) and (kind!='2d' or scattering!='monostatic'):
+        raise ValueError('Adaptive polynomial meshing supports 2D monostatic runs only.')
     if value['mesh_strategy'] == 'local' and (kind != '2d' or scattering != 'monostatic'):
         raise ValueError('Local material meshing supports 2D monostatic runs only.')
     if kind != '2d' and mode != 'dense':
@@ -268,6 +280,8 @@ def configured_execution(function):
                 base=from_environment()
                 if not os.environ.get('GHOST_CPU_FACTORIZATION','').strip():
                     base['factorization']='adaptive'
+                if requested is None or 'mesh_strategy' not in requested:
+                    base['mesh_strategy']='adaptive'
                 requested=dict(base,**(requested or {}))
             supplied.arguments['solver_method']='experimental_cpu' if requested_precision()=='double' else 'direct'
             if requested_precision()!='double' and inherited is None and requested['factorization']=='adaptive':
@@ -352,18 +366,35 @@ def configured_execution(function):
                 gc.collect()
             raise RuntimeError('Automatic backend retry exhausted.')
 
-        with execution_scope(value, limit_blas=requested is not None and inherited is None):
+        with _AUTOMATIC_REQUEST.override(selection is not None or _AUTOMATIC_REQUEST.get()), execution_scope(value, limit_blas=requested is not None and inherited is None):
             result = invoke()
             if isinstance(result, dict):
-                result.setdefault('metadata', {})['execution_options'] = dict(value)
+                metadata = result.setdefault('metadata', {})
+                adaptation = metadata.get('adaptive_mesh', {})
+                actual = dict(value, basis_order=metadata.get('polynomial_degree', value['basis_order']))
+                per_frequency = metadata.get('frequency_metadata', [])
+                if per_frequency:
+                    actual = dict(value)
+                    metadata['execution_options_scope'] = 'request; effective settings are in frequency_metadata'
+                if adaptation.get('final_backend') and not per_frequency:
+                    actual['factorization'] = adaptation['final_backend']
+                    if selection is not None and selection['selected'] != actual['factorization']:
+                        selection = dict(selection, initial_selection=selection['selected'],
+                            selected=actual['factorization'],
+                            reason='Backend reselected on the adaptive mesh; see adaptive_mesh steps for admission evidence.')
+                metadata['execution_options'] = actual
+                result['metadata'].setdefault('polynomial_degree', value['basis_order'])
                 result['metadata']['execution_wall_seconds']=time.perf_counter()-execution_start
                 if allocated_memory_budget() is not None:
                     result['metadata']['execution_memory_reservation_gib']=allocated_memory_budget()
-                if value['factorization']=='fmm':
+                if value['factorization']=='fmm' and not result['metadata'].get('adaptive_mesh'):
                     result['metadata']['solver_method']='galerkin_fmm_gmres'
                     if fmm_requested:result['metadata']['solver_method_requested']='fmm'
                 if selection is not None:
-                    result['metadata']['backend_selection'] = selection
+                    if per_frequency and metadata.get('backend_selection'):
+                        metadata['request_backend_selection'] = selection
+                    else:
+                        metadata['backend_selection'] = selection
                     result['metadata']['requested_execution_options'] = requested_value
                 if automatic:
                     result['metadata']['solver_method_requested']='auto'
@@ -371,7 +402,7 @@ def configured_execution(function):
                     assembly=effective_assembly_threads(), blas=current_options()['blas_threads'])
                 if timing_key is not None:
                     from ghost_backend.execution.timing_history import record
-                    record(timing_key,value['factorization'],result['metadata']['execution_wall_seconds'],result['metadata'])
+                    record(timing_key,actual['factorization'],result['metadata']['execution_wall_seconds'],result['metadata'])
             return result
     @wraps(function)
     def call(*args,**kwargs):

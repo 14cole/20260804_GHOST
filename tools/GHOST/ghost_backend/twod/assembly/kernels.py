@@ -7,6 +7,7 @@ from scipy.fftpack import dct
 from scipy.interpolate import PPoly
 from scipy.special import hankel2
 from ghost_backend.execution.metrics import timed_stage
+from ghost_backend.twod.basis import plane_wave_moments
 from ghost_backend.execution.cpu import current_state, TABLE_BYTES
 
 
@@ -40,6 +41,9 @@ def moments(centers, edges, lengths, k, dirs):
 @timed_stage("excitation")
 def incident(elem, k_air, elevations_deg, order=8):
     dirs = directions(elevations_deg)
+    if len(elem.node_ids) > 2:
+        return plane_wave_moments(np.array([elem.center]), np.array([elem.p1-elem.p0]),
+            np.array([elem.length]), k_air, dirs, len(elem.node_ids)-1)[0]
     i0,i1 = moments(np.array([elem.center]), np.array([elem.p1-elem.p0]),
                     np.array([elem.length]), k_air, dirs)
     return np.vstack((i0[0],i1[0]))
@@ -53,12 +57,13 @@ def incident_dn(elem, k_air, elevations_deg, order=8):
 
 def geometry_arrays(mesh, element_mask=None):
     elements = mesh.elements
+    width = len(elements[0].node_ids) if elements else 2
     if element_mask is not None:
         mask = np.asarray(element_mask,dtype=bool).reshape(-1)
         if mask.size != len(elements):
             raise ValueError("Element mask size does not match mesh")
         elements = [e for e,keep in zip(elements,mask) if keep]
-    return (np.array([e.node_ids for e in elements],dtype=np.int64).reshape(-1,2),
+    return (np.array([e.node_ids for e in elements],dtype=np.int64).reshape(-1,width),
             np.array([e.center for e in elements],dtype=float).reshape(-1,2),
             np.array([e.p1-e.p0 for e in elements],dtype=float).reshape(-1,2),
             np.array([e.length for e in elements],dtype=float),
@@ -83,6 +88,14 @@ def farfield(mesh,density,k_air,observation_angles_deg,potential,order=8,
     block=max(1,min(len(ids),250000//len(dirs)))
     for start in range(0,len(ids),block):
         part=slice(start,start+block)
+        if ids.shape[1] > 2:
+            moments_all = plane_wave_moments(centers[part], edges[part], lengths[part], k_air, dirs, ids.shape[1]-1)
+            if potential == 'DLP':
+                moments_all *= (1j*float(k_air)*(normals[part] @ dirs.T))[:, None, :]
+            for local in range(ids.shape[1]):
+                if projection == 'grid': result += rho[ids[part, local]].T @ moments_all[:, local]
+                else: result += np.sum(rho[ids[part, local]] * moments_all[:, local], axis=0)
+            continue
         i0,i1=moments(centers[part],edges[part],lengths[part],k_air,dirs)
         if potential=="DLP":
             factor=1j*float(k_air)*(normals[part] @ dirs.T)
@@ -116,6 +129,14 @@ def incident_loads(mesh,k,angles,bu=None,bdn=None, want_u=True, want_dn=True,
     for start in range(0,len(ids),block):
         part=slice(start,start+block)
         def dot2(a):return a[:,0,None]*dirs[None,:,0]+a[:,1,None]*dirs[None,:,1]
+        if ids.shape[1] > 2:
+            moments_all = plane_wave_moments(centers[part], edges[part], lengths[part], k, dirs, ids.shape[1]-1)
+            dn = 1j*float(k)*dot2(normals[part])
+            if coefficients is not None: dn = dn + coefficients[part, None]
+            for local in range(ids.shape[1]):
+                if want_u: np.add.at(bu, ids[part, local], moments_all[:, local])
+                if want_dn: np.add.at(bdn, ids[part, local], moments_all[:, local]*dn)
+            continue
         f,fp=sinc_and_derivative(.5*float(k)*dot2(edges[part]))
         phase=lengths[part,None]*np.exp(1j*float(k)*dot2(centers[part]))
         i0=phase*(.5*f+1j*fp);i1=phase*(.5*f-1j*fp)

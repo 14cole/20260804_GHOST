@@ -110,6 +110,8 @@ def solve_thin_layer_fields(mesh, k0, incidence_angles_deg, polarization,
     other material models are deliberately not inferred from this API.
     """
     import ghost_backend.twod.solver as rcs
+    if any(len(element.node_ids) != 2 for element in mesh.elements):
+        raise ValueError('Thin-layer asymptotic equations require the qualified linear basis.')
     eps, mu, d, electrical = validate_thin_layer(epsilon, permeability, thickness_m, k0)
     pol = str(polarization).upper()
     if pol not in {"TM", "TE"}:

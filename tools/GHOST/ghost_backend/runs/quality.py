@@ -71,6 +71,16 @@ def solver_report_text(metadata):
         lines.append('Automatic backend: ' + str(selection['selected']) + '. ' + str(selection['reason']))
     if 'mesh_strategy_used' in metadata:
         lines.append('Mesh sizing: ' + str(metadata['mesh_strategy_used']))
+    if metadata.get('polynomial_degree_min') != metadata.get('polynomial_degree_max'):
+        lines.append('Boundary polynomial degrees: {}-{} (see frequency metadata).'.format(
+            metadata['polynomial_degree_min'], metadata['polynomial_degree_max']))
+    elif metadata.get('polynomial_degree', 1) > 1:
+        lines.append('Boundary polynomial degree: ' + str(metadata['polynomial_degree']))
+    adaptation = metadata.get('adaptive_mesh', {})
+    if adaptation.get('steps'):
+        lines.append('Adaptive accuracy checks: ' + str(len(adaptation['steps'])))
+    if adaptation.get('fallback'):
+        lines.append('Reference mesh used after adaptive rejection: ' + str(adaptation.get('reason', '')))
     if metadata.get('local_mesh_fallback'):
         lines.append('Frequencies that failed the local mesh comparison passed after retrying global sizing.')
     checkpoints = metadata.get('frequency_checkpoints')

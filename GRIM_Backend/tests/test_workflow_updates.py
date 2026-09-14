@@ -194,6 +194,7 @@ class WorkflowUpdatesTests(unittest.TestCase):
         other['observation_angles_deg']=[0.,90.]
         other['solver_method']='direct'
         other['execution_options']['factorization']='dense'
+        other['execution_options']['mesh_strategy']='global'
         local._apply_saved_run_setup(other)
         self.assertEqual(local._capture_run_setup(),other)
         bad=copy.deepcopy(value); bad['frequencies_ghz']=[float('nan')]

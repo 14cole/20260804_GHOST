@@ -40,6 +40,7 @@ class Panel:
 
 
     arc_s_center: 'float' = 0.5
+    primitive_key: 'str' = ''
 
 @dataclass
 class LinearNode:
@@ -50,14 +51,14 @@ class LinearNode:
 
 @dataclass
 class LinearElement:
-    """Two-node straight boundary element used by the Galerkin discretization."""
+    """Straight boundary element; endpoints precede any polynomial interior nodes."""
 
     name: 'str'
     seg_type: 'int'
     ibc_flag: 'int'
     pos_mat: 'int'
     neg_mat: 'int'
-    node_ids: 'Tuple[int, int]'
+    node_ids: 'Tuple[int, ...]'
     p0: 'np.ndarray'
     p1: 'np.ndarray'
     center: 'np.ndarray'
@@ -66,6 +67,7 @@ class LinearElement:
     length: 'float'
     panel_index: 'int'
     arc_s_center: 'float' = 0.5
+    primitive_key: 'str' = ''
 
 @dataclass
 class LinearMesh:
@@ -1230,6 +1232,9 @@ def _build_panels(
     `_check_segment_orientation_or_raise`), never silently corrected here.
     """
 
+    from ghost_backend.twod.adaptive_geometry import protected_vertices, panel_parameters
+    hp = '_2d_hp_coarsening' in geometry_snapshot
+    protected = protected_vertices(geometry_snapshot, meters_scale) if hp else set()
     panels: 'List[Panel]' = []
     segments = geometry_snapshot.get("segments", []) or []
     refinement_factor = float(
@@ -1323,7 +1328,17 @@ def _build_panels(
                         "automatic material-wavelength meshing. Production "
                         "results still require base/fine mesh convergence."
                     )
-            pts = _discretize_primitive(p0, p1, count)
+            primitive_id = ''
+            if hp:
+                reference_n = _parse_int(base_segment_n[seg_idx], 0) if refinement_factor > 1 else n_prop
+                reference_count = _panel_count_from_n(reference_n, prim_len, wavelength)
+                primitive_id, pts = panel_parameters(geometry_snapshot, seg_idx, p0, p1,
+                    reference_count, reference_n > 0, refinement_factor, protected)
+                count = len(pts) - 1
+            else:
+                pts = _discretize_primitive(p0, p1, count)
+            if len(panels) + count > max(1, int(max_panels)):
+                raise ValueError('Discretization exceeds the configured panel limit.')
 
             for i in range(count):
                 q0 = pts[i]
@@ -1351,6 +1366,7 @@ def _build_panels(
                         normal=normal,
                         length=length,
                         arc_s_center=0.5,
+                        primitive_key=primitive_id,
                     )
                 )
 
@@ -1435,12 +1451,14 @@ def _build_linear_mesh(
                 length=float(panel.length),
                 panel_index=int(pidx),
                 arc_s_center=float(panel.arc_s_center),
+                primitive_key=panel.primitive_key,
             )
         )
 
     if not elements:
         raise ValueError("Linear mesh construction requires at least one element.")
-    return LinearMesh(nodes=nodes, elements=elements)
+    from ghost_backend.twod.basis import enrich
+    return enrich(LinearMesh(nodes=nodes, elements=elements))[0]
 
 def _linear_panel_signature_from_info(
     panel: 'Panel',
@@ -1515,6 +1533,7 @@ def _build_linear_mesh_interface_aware(
                 length=float(panel.length),
                 panel_index=int(pidx),
                 arc_s_center=float(panel.arc_s_center),
+                primitive_key=panel.primitive_key,
             )
         )
 
@@ -1540,7 +1559,8 @@ def _build_linear_mesh_interface_aware(
         "split_boundary_primitive_count": int(len(elements)),
         "multi_signature_node_count": multi_sig,
     }
-    return mesh, stats
+    from ghost_backend.twod.basis import enrich
+    return enrich(mesh, stats)
 
 
 def _medium_eta(eps: 'complex', mu: 'complex') -> 'complex':

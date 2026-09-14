@@ -28,6 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Un
 from ghost_backend.twod.constants import EPS, EULER_GAMMA
 from ghost_backend.twod.special import _SCIPY_SPECIAL, _hankel2_0, _hankel2_1
 from ghost_backend.twod.geometry import _linear_shape_values, _surface_robin_alpha
+from ghost_backend.twod.basis import values as _polynomial_values, mesh_degree, derivative_matrix
 
 
 def _linear_param_to_point(elem: 'LinearElement', xi: 'float') -> 'np.ndarray':
@@ -220,7 +221,8 @@ def _integrate_linear_pairs_box_sk_batched(
     if obs_ids.size != src_ids.size:
         raise ValueError("Batched near-pair index arrays must have equal length.")
     npairs = int(obs_ids.size)
-    zero = np.zeros((npairs, 2, 2), dtype=np.complex128)
+    width = len(elements[0].node_ids) if elements else 2
+    zero = np.zeros((npairs, width, width), dtype=np.complex128)
     if npairs == 0:
         return zero.copy(), zero.copy()
     if not bool(compute_single_layer) and not bool(compute_double_layer):
@@ -229,7 +231,7 @@ def _integrate_linear_pairs_box_sk_batched(
     qt, qw = _get_quadrature(max(2, int(order)))
     q = np.asarray(qt, dtype=float)
     weights = np.asarray(qw, dtype=float)
-    phi = np.column_stack((1.0 - q, q))
+    phi = _polynomial_values(q, width - 1)
     obs_elems = [elements[int(index)] for index in obs_ids]
     src_elems = [elements[int(index)] for index in src_ids]
     obs_p0 = np.asarray([elem.p0 for elem in obs_elems], dtype=float)
@@ -769,6 +771,9 @@ def _single_layer_block_linear(
     obs_order: 'int' = 8,
     src_order: 'int' = 8,
 ) -> 'np.ndarray':
+    if len(obs_elem.node_ids) > 2 or len(src_elem.node_ids) > 2:
+        from ghost_backend.twod.polynomial_quadrature import near_block
+        return near_block(obs_elem, src_elem, k0)[0]
     if obs_elem.panel_index != src_elem.panel_index:
         shared = _linear_shared_interval_endpoint_info(obs_elem, (0., 1.), src_elem, (0., 1.))
         if shared is not None:
@@ -803,6 +808,11 @@ def _sk_blocks_near_linear(
     compute_single_layer: 'bool' = True,
     compute_double_layer: 'bool' = True,
 ) -> 'Tuple[np.ndarray, np.ndarray]':
+    if len(obs_elem.node_ids) > 2 or len(src_elem.node_ids) > 2:
+        from ghost_backend.twod.polynomial_quadrature import near_block
+        sb, kb = near_block(obs_elem, src_elem, k0, obs_normal_deriv)
+        return (sb if compute_single_layer else np.zeros_like(sb),
+                kb if compute_double_layer else np.zeros_like(kb))
     """
     Compute S and K 2x2 blocks for a near element pair.
 
@@ -1023,6 +1033,9 @@ def _hypersingular_block_from_s_block(
     tangential derivatives.  This avoids all hypersingular quadrature.
     """
 
+    if s_block.shape != (2, 2):
+        from ghost_backend.twod.polynomial_quadrature import hypersingular
+        return hypersingular(s_block, k0, n_obs, n_src, obs_length, src_length)
     k2 = complex(k0) ** 2
     n_dot_n = float(np.dot(n_obs, n_src))
     raw_integral = complex(np.sum(s_block))
@@ -1385,6 +1398,7 @@ def _assemble_linear_operator_matrices_multi(
         far_green, far_hankel = select_far_kernels(mesh, k0, far_green, far_hankel,
             domain_upper=None if prepared_geometry is None else prepared_geometry.domain_upper)
 
+    width = mesh_degree(mesh) + 1
     nnodes = len(mesh.nodes)
     elements = list(mesh.elements) if prepared_geometry is None else prepared_geometry.elements
     nelems = len(elements)
@@ -1525,7 +1539,7 @@ def _assemble_linear_operator_matrices_multi(
         cached = _rule_cache.get(order)
         if cached is None:
             nodes, weights = _get_quadrature(max(2, int(order)))
-            phi = np.array([_linear_shape_values(float(t)) for t in nodes])
+            phi = _polynomial_values(nodes, width - 1)
             cached = (np.asarray(nodes, dtype=float),
                       np.asarray(weights, dtype=float), phi)
             _rule_cache[order] = cached
@@ -1555,7 +1569,7 @@ def _assemble_linear_operator_matrices_multi(
 
     abs_k = abs(complex(k0))
 
-    n_acc = 4 * (int(want_s) + (2 if want_k else 0))
+    n_acc = width**2 * (int(want_s) + (2 if want_k else 0))
     n_kernel = int(want_s) + (2 if want_k else 0)
     tile = _assembly_tile_size(nelems, 16 * (n_acc + n_kernel + 1) + 8 * 7)
 
@@ -1650,7 +1664,7 @@ def _assemble_linear_operator_matrices_multi(
                 np.where(any_far, centre_dist / scale, np.inf)
             )) if any_far.any() else float("inf")
             kl_max = abs_k * float(max(obs_len.max(), src_len.max()))
-            tile_order = _graded_far_order(kl_max, ratio_min, far_obs_order)
+            tile_order = max(width + 2 if width > 2 else 2, _graded_far_order(kl_max, ratio_min, far_obs_order))
             t_obs_f, qw_obs, phi_obs_arr = _rule(tile_order)
             t_src_f, qw_src, phi_src_arr = _rule(tile_order)
 
@@ -1663,15 +1677,15 @@ def _assemble_linear_operator_matrices_multi(
             src_seg = seg_arr[src_global]
             src_pts = src_p0[:, None, :] + t_src_f[None, :, None] * src_seg[:, None, :]
             acc_s = (
-                [np.zeros((mb, nb), dtype=np.complex128) for _ in range(4)]
+                [np.zeros((mb, nb), dtype=np.complex128) for _ in range(width**2)]
                 if want_s else None
             )
             acc_k = (
-                [np.zeros((mb, nb), dtype=np.complex128) for _ in range(4)]
+                [np.zeros((mb, nb), dtype=np.complex128) for _ in range(width**2)]
                 if want_k else None
             )
             acc_kt = (
-                [np.zeros((mb, nb), dtype=np.complex128) for _ in range(4)]
+                [np.zeros((mb, nb), dtype=np.complex128) for _ in range(width**2)]
                 if (want_k and mirrored) else None
             )
             g_buf = np.empty((mb, nb), dtype=np.complex128) if want_s else None
@@ -1730,14 +1744,14 @@ def _assemble_linear_operator_matrices_multi(
                         np.multiply(h1_buf, proj, out=dk_buf)
                         if dgreen_sign < 0.0:
                             np.negative(dk_buf, out=dk_buf)
-                    for a in range(2):
+                    for a in range(width):
                         coeff_a = w * float(phi_o[a])
-                        for b in range(2):
+                        for b in range(width):
                             coeff = coeff_a * float(phi_s[b])
                             if acc_s is not None:
-                                _axpy_into(acc_s[2 * a + b], g_buf, coeff, cscratch)
+                                _axpy_into(acc_s[width * a + b], g_buf, coeff, cscratch)
                             if acc_k is not None:
-                                _axpy_into(acc_k[2 * a + b], dk_buf, coeff, cscratch)
+                                _axpy_into(acc_k[width * a + b], dk_buf, coeff, cscratch)
 
                     if acc_kt is not None:
 
@@ -1749,11 +1763,11 @@ def _assemble_linear_operator_matrices_multi(
                         np.multiply(h1_buf, proj, out=dk_buf)
                         if dgreen_sign > 0.0:
                             np.negative(dk_buf, out=dk_buf)
-                        for a in range(2):
+                        for a in range(width):
                             coeff_a = w * float(phi_s[a])
-                            for b in range(2):
+                            for b in range(width):
                                 _axpy_into(
-                                    acc_kt[2 * a + b], dk_buf,
+                                    acc_kt[width * a + b], dk_buf,
                                     coeff_a * float(phi_o[b]), cscratch,
                                 )
 
@@ -1771,16 +1785,16 @@ def _assemble_linear_operator_matrices_multi(
                             )
                         else:
                             scale_s_ij = scale_ij
-                        for a in range(2):
+                        for a in range(width):
                             rows = obs_nid[:, a][:, None]
-                            for b in range(2):
+                            for b in range(width):
                                 cols = src_nid[None, :, b]
                                 if acc_s is not None:
                                     scatter_operator_add(s_mats[mi], rows, cols,
-                                              acc_s[2 * a + b] * scale_s_ij)
+                                              acc_s[width * a + b] * scale_s_ij)
                                 if acc_k is not None and want_k_masks[mi]:
                                     scatter_operator_add(k_mats[mi], rows, cols,
-                                              acc_k[2 * a + b] * scale_ij)
+                                              acc_k[width * a + b] * scale_ij)
                     fji = far_ji.get(mi)
                     if fji is not None and fji.any():
                         scale_ji = len_prod * fji
@@ -1792,18 +1806,18 @@ def _assemble_linear_operator_matrices_multi(
                             )
                         else:
                             scale_s_ji = scale_ji
-                        for a in range(2):
+                        for a in range(width):
                             rows = src_nid[:, a][:, None]
-                            for b in range(2):
+                            for b in range(width):
                                 cols = obs_nid[None, :, b]
                                 if acc_s is not None:
 
 
                                     scatter_operator_add(s_mats[mi], rows, cols,
-                                              (acc_s[2 * b + a] * scale_s_ji).T)
+                                              (acc_s[width * b + a] * scale_s_ji).T)
                                 if acc_kt is not None and want_k_masks[mi]:
                                     scatter_operator_add(k_mats[mi], rows, cols,
-                                              (acc_kt[2 * a + b] * scale_ji).T)
+                                              (acc_kt[width * a + b] * scale_ji).T)
 
         if local_near:
             with write_lock:
@@ -2007,6 +2021,8 @@ def _assemble_linear_hypersingular_matrix(
         from ghost_backend.twod.assembly.kernels import select_far_kernels
         far_green, far_hankel = select_far_kernels(mesh, k0, far_green, far_hankel)
 
+    width = mesh_degree(mesh) + 1
+    basis_derivative = derivative_matrix(width - 1)
     nnodes = len(mesh.nodes)
     if output_node_ids is not None:
         if destination is not None:
@@ -2059,11 +2075,11 @@ def _assemble_linear_hypersingular_matrix(
 
     box_order = max(int(obs_order), int(src_order), 16)
     qt, qw = _get_quadrature(max(2, box_order))
-    phi_arr = np.array([_linear_shape_values(float(t)) for t in qt])
+    phi_arr = _polynomial_values(qt, width - 1)
     t_f = np.asarray(qt, dtype=float)
     quad_pts = p0_arr[:, None, :] + t_f[None, :, None] * seg_arr[:, None, :]
 
-    tile = _assembly_tile_size(nelems, 16 * 7 + 8 * 5)
+    tile = _assembly_tile_size(nelems, 16 * (width**2 + 3) + 8 * 5)
     real_k = _wavenumber_is_real(k0)
     k2 = complex(k0) ** 2
     touch_tol_sq = 1.0e-12 ** 2
@@ -2139,7 +2155,7 @@ def _assemble_linear_hypersingular_matrix(
                 continue
 
             src_pts = quad_pts[src_slice]
-            acc = [np.zeros((mb, nb), dtype=np.complex128) for _ in range(4)]
+            acc = [np.zeros((mb, nb), dtype=np.complex128) for _ in range(width**2)]
             g_buf = np.empty((mb, nb), dtype=np.complex128)
             cscratch = np.empty((mb, nb), dtype=np.complex128)
             dx = np.empty((mb, nb), dtype=float)
@@ -2167,11 +2183,11 @@ def _assemble_linear_hypersingular_matrix(
 
                     w = w_obs_qi * float(qw[qj])
                     phi_s = phi_arr[qj]
-                    for a in range(2):
+                    for a in range(width):
                         coeff_a = w * float(phi_o[a])
-                        for b in range(2):
+                        for b in range(width):
                             _axpy_into(
-                                acc[2 * a + b], g_buf,
+                                acc[width * a + b], g_buf,
                                 coeff_a * float(phi_s[b]), cscratch,
                             )
 
@@ -2187,17 +2203,17 @@ def _assemble_linear_hypersingular_matrix(
             def _emit(mask: 'np.ndarray', swap: 'bool', transpose: 'bool') -> 'None':
                 scale_mat = len_prod * mask
                 scaled = [entry * scale_mat for entry in acc]
-                block_sum = scaled[0] + scaled[1] + scaled[2] + scaled[3]
-                block_sum /= denom
+                local_blocks = np.asarray(scaled).reshape(width, width, mb, nb)
+                derivative_blocks = np.einsum("ia,ijmn,jb->abmn", basis_derivative, local_blocks, basis_derivative) / denom
                 rows_src = src_nid if transpose else obs_nid
                 cols_src = obs_nid if transpose else src_nid
-                for a in range(2):
+                for a in range(width):
                     rows = rows_src[:, a][:, None]
-                    for b in range(2):
+                    for b in range(width):
                         cols = cols_src[None, :, b]
-                        index = (2 * b + a) if swap else (2 * a + b)
+                        index = (width * b + a) if swap else (width * a + b)
                         contrib = factor * scaled[index]
-                        contrib += _TANGENT_OUTER[a, b] * block_sum
+                        contrib += derivative_blocks[b, a] if swap else derivative_blocks[a, b]
                         scatter_operator_add(
                             d_mat, rows, cols,
                             contrib.T if transpose else contrib,
@@ -2249,6 +2265,9 @@ def _linear_element_incident_load_many(
     elevations_deg: 'np.ndarray',
     order: 'int' = 8,
 ) -> 'np.ndarray':
+    if len(elem.node_ids) > 2:
+        from ghost_backend.twod.assembly.kernels import incident
+        return incident(elem, k_air, elevations_deg, order)
     if current_state() is not None:
         from ghost_backend.twod.assembly.kernels import incident
         return incident(elem, k_air, elevations_deg, order)
@@ -2272,6 +2291,9 @@ def _linear_element_incident_dn_load_many(
     elevations_deg: 'np.ndarray',
     order: 'int' = 8,
 ) -> 'np.ndarray':
+    if len(elem.node_ids) > 2:
+        from ghost_backend.twod.assembly.kernels import incident_dn
+        return incident_dn(elem, k_air, elevations_deg, order)
     """
     Galerkin-tested normal derivative of the incident plane wave on one element.
 
@@ -2310,6 +2332,9 @@ def _farfield_linear_density_many(
     element_mask: 'Optional[np.ndarray]' = None,
     projection: 'str' = "matched",
 ) -> 'np.ndarray':
+    if mesh_degree(mesh) > 1:
+        from ghost_backend.twod.assembly.kernels import farfield
+        return farfield(mesh, density, k_air, observation_angles_deg, potential, order, element_mask, projection)
     """Vectorized SLP/DLP far field for matched or rectangular projections.
 
     ``density`` may contain one column (one incidence projected at every
@@ -2404,6 +2429,9 @@ def _farfield_linear_density_many(
 def _linear_mass_block(elem: 'LinearElement') -> 'np.ndarray':
     """Consistent 2-node boundary mass matrix on one straight element."""
 
+    if len(elem.node_ids) > 2:
+        from ghost_backend.twod.basis import mass_block
+        return mass_block(elem).astype(complex)
     l = float(elem.length)
     return l * np.asarray([[1.0 / 3.0, 1.0 / 6.0], [1.0 / 6.0, 1.0 / 3.0]], dtype=np.complex128)
 
@@ -2478,7 +2506,7 @@ def _build_linear_junction_constraints(
     nnodes = len(mesh.nodes)
     grouped: 'Dict[Tuple[int, int], List[Tuple[int, int, int]]]' = {}
     for eidx, elem in enumerate(mesh.elements):
-        n0, n1 = (int(v) for v in elem.node_ids)
+        n0, n1 = (int(v) for v in elem.node_ids[:2])
         grouped.setdefault(mesh.nodes[n0].key, []).append((int(eidx), 0, n0))
         grouped.setdefault(mesh.nodes[n1].key, []).append((int(eidx), 1, n1))
 

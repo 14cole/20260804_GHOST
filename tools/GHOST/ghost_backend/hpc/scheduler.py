@@ -252,7 +252,8 @@ def _resource_records_for_frequency(
         snapshot, materials, freq_ghz
     )
     panels = rcs_solver._build_panels(
-        snapshot, unit_scale, lambda_min, max_panels=int(max_panels)
+        snapshot, unit_scale, lambda_min, max_panels=int(max_panels),
+        segment_wavelengths=rcs_solver.segment_wavelengths(snapshot, materials, [freq_ghz], unit_scale, lambda_min)
     )
 
 
@@ -364,51 +365,25 @@ def predict_2d_resources_many(
         material_library=materials,
     )
 
-    if float(fine_factor) <= 1.0:
-        fine_snapshot = base_snapshot
-    else:
-        fine_snapshot = scale_snapshot_panel_density(
-            base_snapshot, float(fine_factor)
-        )
-        base_segment_n = []
-        for segment in list(base_snapshot.get("segments", []) or []):
-            props = list(segment.get("properties", []) or [])
-            base_segment_n.append(props[1] if len(props) > 1 else 0)
-        fine_snapshot["_2d_certification_refinement_factor"] = float(
-            fine_factor
-        )
-        fine_snapshot["_2d_certification_base_segment_n"] = base_segment_n
-        rcs_solver.validate_geometry_snapshot_for_solver(
-            fine_snapshot,
-            base_dir=base_dir,
-            meters_scale=unit_scale,
-            material_library=materials,
-        )
-
-    planned = {}  # type: Dict[Tuple[float, str], Dict[str, Any]]
+    from ghost_backend.twod.adaptive_geometry import candidate_meshes
+    original_snapshot = base_snapshot
+    def resource_record(snapshot, degree, freq):
+        if settings is None:
+            return _resource_records_for_frequency(rcs_solver,snapshot,materials,freq,normalized_pols,unit_scale,max_panels)
+        chosen = dict(settings,basis_order=degree,
+            mesh_strategy='local' if '_2d_hp_coarsening' in snapshot else settings['mesh_strategy'])
+        with execution_scope(chosen):
+            return _resource_records_for_frequency(rcs_solver,snapshot,materials,freq,normalized_pols,unit_scale,max_panels)
+    planned = {}
     for freq_ghz in frequencies:
-        base_records = _resource_records_for_frequency(
-            rcs_solver,
-            base_snapshot,
-            materials,
-            freq_ghz,
-            normalized_pols,
-            unit_scale,
-            max_panels,
-        )
-        fine_records = (
-            base_records
-            if fine_snapshot is base_snapshot
-            else _resource_records_for_frequency(
-                rcs_solver,
-                fine_snapshot,
-                materials,
-                freq_ghz,
-                normalized_pols,
-                unit_scale,
-                max_panels,
-            )
-        )
+        candidates = candidate_meshes(original_snapshot, materials, float(fine_factor),
+            settings is not None and settings['mesh_strategy']=='adaptive', [freq_ghz], unit_scale)
+        base_snapshot, fine_snapshot = candidates[0][1], candidates[-1][1]
+        base_degree, fine_degree = candidates[0][2], candidates[-1][2]
+        if settings is not None and settings['mesh_strategy']!='adaptive':
+            base_degree = fine_degree = settings['basis_order']
+        base_records = resource_record(base_snapshot,base_degree,freq_ghz)
+        fine_records = base_records if len(candidates)==1 else resource_record(fine_snapshot,fine_degree,freq_ghz)
         for requested_pol in requested_pols:
             base = base_records[requested_pol]
             fine = fine_records[requested_pol]
@@ -430,6 +405,9 @@ def predict_2d_resources_many(
             peak_gb, memory_estimate = max(estimates.values(), key=lambda value: value[0])
             planned[(freq_ghz, requested_pol)] = {
                 "nodes": int(base["nodes"]),
+                "base_polynomial_degree": base_degree,
+                "fine_polynomial_degree": fine_degree,
+                "adaptive_refinements_readmitted": bool(settings and settings["mesh_strategy"]=="adaptive"),
                 "panels": int(base["panels"]),
                 "base_system_dofs": int(base["system_dofs"]),
                 "base_operator_matrices": int(base["operator_matrices"]),
@@ -450,7 +428,7 @@ def predict_2d_resources_many(
                 from ghost_backend.execution.policy import relative_cost, MODEL
                 planned[(freq_ghz, requested_pol)]['backend_candidates'] = {
                     mode: dict(peak_gb=peak, memory_estimate=estimate, model=MODEL,
-                               cost=relative_cost(base,n_angles,mode)+(relative_cost(fine,n_angles,mode) if fine_snapshot is not base_snapshot else 0.))
+                               cost=relative_cost(base,n_angles,mode)+(relative_cost(fine,n_angles,mode) if len(candidates)>1 else 0.))
                     for mode, (peak, estimate) in estimates.items()
                 }
             if progress is not None:

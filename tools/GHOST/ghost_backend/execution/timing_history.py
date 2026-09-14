@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 import platform
 import statistics
-import tempfile
+import uuid
 import time
 
 MAX_BYTES=2*1024**2
@@ -101,6 +101,13 @@ def record(key,mode,seconds,metadata):
     if (key is None or mode not in ('dense','compressed','fmm') or not math.isfinite(seconds) or seconds<=0 or
         seconds>MAX_AGE or not metadata.get('quality_gate',{}).get('passed') or
         metadata.get('backend_selection',{}).get('failed_attempts')):return
+    if metadata.get('frequency_metadata') and any(
+        row['metadata'].get('backend_selection',{}).get('selected',mode) != mode or
+        row['metadata'].get('adaptive_mesh',{}).get('fallback')
+        for row in metadata['frequency_metadata']):return
+    adaptation=metadata.get('adaptive_mesh',{})
+    if (adaptation.get('fallback') or any(step.get('failed_backends') or step.get('backend') != mode
+                                        for step in adaptation.get('steps',[]))):return
     path=cache_path();temporary=None
     try:
         entries=read();entry=entries.setdefault(key,{})
@@ -110,8 +117,13 @@ def record(key,mode,seconds,metadata):
         # Concurrent writers may lose a timing sample, never a solver result.
         while len(entries)>MAX_ENTRIES:entries.pop(next(iter(entries)))
         path.parent.mkdir(parents=True,exist_ok=True)
-        with tempfile.NamedTemporaryFile(mode='w',encoding='utf-8',dir=path.parent,delete=False) as stream:
-            temporary=Path(stream.name);json.dump(entries,stream,allow_nan=False)
+        # Windows tempfile can retry PermissionError for an effectively
+        # unwritable directory billions of times. This optional cache gets one
+        # exclusive creation attempt and never holds up a completed solve.
+        candidate=path.with_name('.timings-'+uuid.uuid4().hex+'.tmp')
+        with open(candidate,'x',encoding='utf-8') as stream:
+            temporary=candidate
+            json.dump(entries,stream,allow_nan=False)
         os.replace(temporary,path)
     except (OSError,ValueError):pass
     finally:

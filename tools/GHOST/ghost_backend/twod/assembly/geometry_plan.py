@@ -8,7 +8,8 @@ class AssemblyGeometry:
         self.elements = tuple(mesh.elements)
         self.centers = np.asarray([e.center for e in self.elements], float).reshape(-1, 2)
         self.lengths = np.asarray([e.length for e in self.elements], float)
-        self.node_ids = np.asarray([e.node_ids for e in self.elements], int).reshape(-1, 2)
+        width = len(self.elements[0].node_ids) if self.elements else 2
+        self.node_ids = np.asarray([e.node_ids for e in self.elements], int).reshape(-1, width)
         self.p0 = np.asarray([e.p0 for e in self.elements], float).reshape(-1, 2)
         self.segments = np.asarray([e.p1-e.p0 for e in self.elements], float).reshape(-1, 2)
         self.normals = np.asarray([e.normal for e in self.elements], float).reshape(-1, 2)

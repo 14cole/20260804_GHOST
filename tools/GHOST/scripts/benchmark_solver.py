@@ -52,6 +52,8 @@ def main():
     parser.add_argument('--modes',nargs='+',choices=['auto','dense','compressed','fmm'],default=['auto'])
     parser.add_argument('--repeats',type=int,default=2)
     parser.add_argument('--certified',action='store_true')
+    parser.add_argument('--mesh-strategy',choices=['adaptive','global','local'],default='adaptive',
+                        help='Accuracy strategy for comparison; normal production uses Automatic.')
     parser.add_argument('--condition-estimate',action='store_true',
                         help='Include condition estimation in raw timings; certification always includes it.')
     parser.add_argument('--forecast-only',action='store_true')
@@ -73,7 +75,7 @@ def main():
                     command=[sys.executable,str(Path(__file__).resolve()),str(args.geometry.resolve()),
                         '--worker','--frequencies',str(frequency),'--modes',mode,'--units',args.units,
                         '--angles',str(args.angles),'--threads',str(args.threads),'--storage-mib',str(args.storage_mib),
-                        '--output',str(output.resolve())]
+                        '--output',str(output.resolve()),'--mesh-strategy',args.mesh_strategy]
                     if args.ram_gib is not None:command+=['--ram-gib',str(args.ram_gib)]
                     if args.certified:command+=['--certified']
                     if args.condition_estimate:command+=['--condition-estimate']
@@ -99,7 +101,7 @@ def main():
     snapshot=build_geometry_snapshot(*parse_geometry(raw.decode('utf-8-sig')))
     snapshot['source_path']=str(args.geometry.resolve())
     mode=args.modes[0]
-    options=validate_options(dict(factorization='adaptive' if mode=='auto' else mode,
+    options=validate_options(dict(factorization='adaptive' if mode=='auto' else mode,mesh_strategy=args.mesh_strategy,
         assembly_threads=args.threads,blas_threads=args.threads,compressed_storage_mib=args.storage_mib,
         ram_budget_gib=args.ram_gib))
     arguments=dict(geometry_snapshot=snapshot,frequencies_ghz=args.frequencies,

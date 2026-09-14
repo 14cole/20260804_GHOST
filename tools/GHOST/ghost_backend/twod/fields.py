@@ -7,7 +7,7 @@ from ghost_backend.linalg.dense import DenseFactor
 def solve_fields(mesh, matrix, k0, angles, rhs_builder, diagnostics, label,
                  potential='SLP', density_builder=None, observation_angles=None,
                  element_mask=None, order=8, return_density=False, project=True,
-                 second_potential=None, coordinates=None, second_density_builder=None):
+                 second_potential=None, coordinates=None, second_density_builder=None, adaptive_routes=None):
     import ghost_backend.twod.solver as rcs
     angles = np.asarray(angles, dtype=float).reshape(-1)
     observations = angles if observation_angles is None else np.asarray(observation_angles, float).reshape(-1)
@@ -37,7 +37,7 @@ def solve_fields(mesh, matrix, k0, angles, rhs_builder, diagnostics, label,
     if coordinates is None and len(matrix) in (len(mesh.nodes), 2*len(mesh.nodes)):
         xy = np.zeros((len(mesh.nodes), 2))
         for element in mesh.elements:
-            xy[element.node_ids[0]], xy[element.node_ids[1]] = element.p0, element.p1
+            xy[list(element.node_ids)] = [mesh.nodes[i].xy for i in element.node_ids]
         coordinates = np.tile(xy, (len(matrix)//len(mesh.nodes), 1))
     from ghost_backend.compressed.factor import CompressedFactor
     factor_class=FMMFactor if fmm else CompressedFactor if compressed else DenseFactor
@@ -68,6 +68,8 @@ def solve_fields(mesh, matrix, k0, angles, rhs_builder, diagnostics, label,
             relative = factor.relative_residual
         max_residual = max(max_residual, float(np.max(relative)))
         density = solution[:len(mesh.nodes)] if density_builder is None else density_builder(solution)
+        from ghost_backend.twod.adaptivity import observe
+        observe(mesh, solution, density, adaptive_routes)
         if densities is not None:
             densities[:, start:stop] = density
         if project:

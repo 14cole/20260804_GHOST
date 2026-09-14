@@ -27,7 +27,7 @@ def checkpoint():
 
 def coordinates(mesh,n):
     xy=np.zeros((len(mesh.nodes),2))
-    for e in mesh.elements:xy[list(e.node_ids)]=[e.p0,e.p1]
+    for e in mesh.elements:xy[list(e.node_ids)]=[mesh.nodes[i].xy for i in e.node_ids]
     return np.tile(xy,(n//len(mesh.nodes),1))
 
 

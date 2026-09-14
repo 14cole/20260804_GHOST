@@ -126,6 +126,29 @@ def test_timing_request_identity_changes_with_angles_precision_and_settings():
         assert request_key(arguments,options,'solve_monostatic_rcs_2d')!=base
 
 
+def test_unwritable_timing_cache_returns_after_one_attempt(tmp_path,monkeypatch):
+    from ghost_backend.execution import timing_history as history
+    monkeypatch.setenv('GHOST_TIMING_CACHE_DIR',str(tmp_path))
+    attempts=[]
+    def denied(*args,**kwargs):
+        attempts.append(args)
+        raise PermissionError('read-only timing cache')
+    monkeypatch.setattr(history,'open',denied,raising=False)
+    history.record('completed','dense',1.,dict(quality_gate=dict(passed=True)))
+    assert len(attempts)==1
+    assert not history.cache_path().exists()
+    assert not list(tmp_path.glob('*.tmp'))
+
+
+def test_one_frequency_reference_fallback_does_not_train_timings(tmp_path,monkeypatch):
+    from ghost_backend.execution import timing_history as history
+    monkeypatch.setenv('GHOST_TIMING_CACHE_DIR',str(tmp_path))
+    history.record('mixed','dense',1.,dict(quality_gate=dict(passed=True),frequency_metadata=[
+        dict(metadata=dict(backend_selection=dict(selected='dense'),adaptive_mesh=dict(fallback=False))),
+        dict(metadata=dict(backend_selection=dict(selected='dense'),adaptive_mesh=dict(fallback=True)))]))
+    assert not history.cache_path().exists()
+
+
 def test_resident_matrix_credit_preserves_absolute_budgets():
     from ghost_backend.execution.options import execution_scope
     with patch.object(solver,'_detect_available_gb',return_value=4.):

@@ -1010,7 +1010,7 @@ def _assert_supported_te_type2_contours(
     for elem, info in zip(mesh.elements, infos):
         if int(info.seg_type) != 2:
             continue
-        for nid in elem.node_ids:
+        for nid in elem.node_ids[:2]:
             key = mesh.nodes[int(nid)].key
             type2_degree[key] = type2_degree.get(key, 0) + 1
 
@@ -1475,7 +1475,7 @@ def _geometric_sheet_endpoint_nodes(
     for eidx, elem in enumerate(mesh.elements):
         if infos is not None and int(infos[eidx].seg_type) != 1:
             continue
-        for nid in elem.node_ids:
+        for nid in elem.node_ids[:2]:
             gk = tuple(mesh.nodes[int(nid)].key)
             geom_count[gk] = geom_count.get(gk, 0) + 1
     endpoint_ids: 'List[int]' = []
@@ -1689,6 +1689,7 @@ def _dense_formulation_resources(
     result = {
         "nodes": nnodes,
         "panels": len(mesh.elements),
+        "basis_width": len(mesh.elements[0].node_ids) if mesh.elements else 2,
         "n_regions": int(len(regions)),
         "formulation": formulation,
         "system_dofs": int(system_dofs),
@@ -1734,7 +1735,8 @@ def _solve_multi_region_indirect(mesh, infos, pol, k0, elevations_deg,
         lambda angles: rhs_many(mesh, layout, k0, angles), condition_diagnostics,
         "multi-region indirect system", density_builder=density, element_mask=mask,
         observation_angles=observation_angles_deg, order=obs_order,
-        return_density=return_density, project=project, coordinates=dof_coordinates(mesh, layout))
+        return_density=return_density, project=project, coordinates=dof_coordinates(mesh, layout),
+        adaptive_routes=[(layout['ifaces'][mi]['nodes'], offset) for (mi, _), (offset, _) in layout['dof_map'].items()])
 
 @prepared_execution
 @configured_execution
@@ -2736,6 +2738,9 @@ def _merge_co_polarized_2d_results(
         for label in expected_channels
     }
     metadata: 'Dict[str, Any]' = {
+        "polynomial_degree": first_metadata.get("polynomial_degree", 1),
+        "linear_node_count": int(_finite_metadata_max(channel_metadata, "linear_node_count")),
+        "mesh_strategy_used": first_metadata.get("mesh_strategy_used", "global"),
         "source_path": first_metadata.get("source_path", ""),
         "segment_count": first_metadata.get("segment_count", 0),
         "panel_count": int(_finite_metadata_max(channel_metadata, "panel_count")),
@@ -2979,6 +2984,8 @@ def _merge_frequency_results(results, frequencies):
     metadata['frequency_metadata'] = [
         {'frequency_ghz': float(frequency), 'metadata': value}
         for frequency, value in zip(frequencies, records)]
+    metadata['polynomial_degree_min'] = min(value.get('polynomial_degree', 1) for value in records)
+    metadata['polynomial_degree_max'] = max(value.get('polynomial_degree', 1) for value in records)
     metadata['operator_cache_scope'] = 'one_frequency'
     metadata['panel_count_min'] = min(value.get('panel_count_min', value.get('panel_count', 0)) for value in records)
     for key in ('dense_factorization_count', 'dense_rhs_batch_count', 'dense_rhs_column_count',
@@ -3430,6 +3437,9 @@ def solve_bistatic_rcs_2d(
 
 def _run_certified_2d_pair(*args, **kwargs):
     from ghost_backend.execution.options import option, execution_scope
+    if option('mesh_strategy', 'global') == 'adaptive':
+        from ghost_backend.twod.adaptivity import run_certified
+        return run_certified(*args, **kwargs)
     try:
         return _run_certified_2d_pair_impl(*args, **kwargs)
     except ValueError as exc:
@@ -3532,6 +3542,10 @@ def _run_certified_2d_pair_impl(
     with solve_phase('Refined mesh'):
         fine_result = low_level_solver(**fine_kwargs)
 
+    return _finish_certified_2d_pair(base_result, fine_result, policy)
+
+
+def _finish_certified_2d_pair(base_result, fine_result, policy):
     if "co_solved_samples" in base_result:
         channels = {}
         for export_pol, internal_pol in _CO_POLARIZED_2D_CHANNELS:
@@ -3565,7 +3579,12 @@ def _certify_2d_results(base_result, fine_result, policy):
     fine_panel_count = int(
         fine_result.get("metadata", {}).get("panel_count", 0) or 0
     )
-    if base_panel_count > 0 and fine_panel_count <= base_panel_count:
+    base_degree = int(base_result.get('metadata', {}).get('polynomial_degree', 1))
+    fine_degree = int(fine_result.get('metadata', {}).get('polynomial_degree', 1))
+    base_nodes = int(base_result.get('metadata', {}).get('linear_node_count', 0))
+    fine_nodes = int(fine_result.get('metadata', {}).get('linear_node_count', 0))
+    enriched = fine_degree > base_degree and fine_panel_count >= base_panel_count and fine_nodes > base_nodes
+    if base_panel_count > 0 and fine_panel_count <= base_panel_count and not enriched:
         raise ValueError(
             "Certified 2-D mesh refinement failed: the fine solve used "
             f"{fine_panel_count} panels versus {base_panel_count} on the base "
@@ -3595,6 +3614,9 @@ def _certify_2d_results(base_result, fine_result, policy):
     mesh_gate["fine_quality_gate"] = dict(
         fine_result.get("metadata", {}).get("quality_gate", {}) or {}
     )
+    mesh_gate["base_polynomial_degree"] = base_degree
+    mesh_gate["fine_polynomial_degree"] = fine_degree
+    mesh_gate["refinement_kind"] = "polynomial" if enriched and fine_panel_count == base_panel_count else "mesh"
     mesh_gate["base_panel_count"] = base_panel_count
     mesh_gate["fine_panel_count"] = fine_panel_count
     mesh_gate["panel_refinement_ratio"] = (
@@ -3891,6 +3913,11 @@ def solve_bistatic_rcs_2d_survey(
     )
 
 
+def _polynomial_density_at_center(element, density):
+    from ghost_backend.twod.basis import values
+    return values(.5, len(element.node_ids)-1) @ density[list(element.node_ids)]
+
+
 @shared_assembly
 def compute_boundary_densities(
     geometry_snapshot: 'Dict[str, Any]',
@@ -4005,7 +4032,7 @@ def compute_boundary_densities(
         check_abort()
         sigma_nodes = ext_density[:, 0]
         density = np.asarray([
-            0.5 * (sigma_nodes[e.node_ids[0]] + sigma_nodes[e.node_ids[1]])
+            _polynomial_density_at_center(e, sigma_nodes)
             for e in mesh.elements
         ], dtype=np.complex128)
         formulation = "Multi-region indirect (exterior SLP density)"
@@ -4016,7 +4043,7 @@ def compute_boundary_densities(
         check_abort()
         mu_nodes = DensityFactor(matrix, checkpoint=check_abort).solve(rhs_many(mesh, k0, elev_arr))[:nnodes, 0]
         density = np.asarray([
-            0.5*(mu_nodes[e.node_ids[0]]+mu_nodes[e.node_ids[1]])
+            _polynomial_density_at_center(e, mu_nodes)
             for e in mesh.elements
         ], dtype=np.complex128)
         formulation = "Indirect dielectric (DLP density)"
@@ -4035,7 +4062,7 @@ def compute_boundary_densities(
         sigma_nodes = DensityFactor(a_sys, checkpoint=check_abort).solve(rhs)[:, 0]
         check_abort()
         density = np.asarray([
-            0.5*(sigma_nodes[e.node_ids[0]]+sigma_nodes[e.node_ids[1]])
+            _polynomial_density_at_center(e, sigma_nodes)
             for e in mesh.elements
         ], dtype=np.complex128)
         formulation = (

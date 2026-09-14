@@ -11,7 +11,8 @@ def forecast(nodes,dofs,regions,batch,storage_cap,resources):
     # With no geometric count, retain the near-assembly ceiling. Each directed
     # panel pair can feed four endpoint pairs and four interface-side blocks.
     directed=resources.get('geometric_near_pairs',2*storage_cap//2304)
-    near_nnz=min(d*d,16*int(directed)*len(orders))
+    width=int(resources.get('basis_width',2))
+    near_nnz=min(d*d,4*width*width*int(directed)*len(orders))
     near_bytes=20*near_nnz+8*(d+1)
     ilu_bytes=20*min(d*d,10*near_nnz)+16*(d+1)
     # Includes scaled CSC copies, SuperLU setup/fill, and sparse routing.

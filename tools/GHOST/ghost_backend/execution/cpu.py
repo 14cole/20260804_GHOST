@@ -119,6 +119,13 @@ def experimental_monostatic(function):
             if enabled() and state.systems:metadata['solver_method']='compressed_experimental_cpu'
             from ghost_backend.twod.fmm.runtime import enabled as fmm_enabled
             if fmm_enabled() and state.systems:metadata['solver_method']='galerkin_fmm_gmres'
+            adaptation=metadata.get('adaptive_mesh',{})
+            if adaptation.get('final_backend'):
+                selected=adaptation['final_backend']
+                metadata['solver_method']={'dense':'dense_lu_experimental_cpu','fmm':'galerkin_fmm_gmres','compressed':'compressed_experimental_cpu'}.get(selected,selected)
+            if metadata.get('frequency_metadata'):
+                methods = {row['metadata'].get('solver_method', '') for row in metadata['frequency_metadata']}
+                metadata['solver_method'] = next(iter(methods)) if len(methods)==1 else 'mixed (see frequency metadata)'
             metadata["experimental_cpu"] = state.report()
             return result
     return call
