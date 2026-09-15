@@ -37,7 +37,8 @@ re-ran byte-identical.
 | F4 | Medium | Galerkin, TM PEC | The combined-field formulation exists only on the FMM backend; dense and compressed solve the bare EFIE for the same input, so the backend choice changes the integral equation |
 | F5 | Low | Docs/API | `fmm_quadrature_order` accepts 6…64 although only even orders are safe for Pulse (see F1) |
 | F6 | Low | Performance | `pulse/coefficients.blocks` evaluates every near pair twice and discards the first result |
-| F7 | Low | Performance | `PulseKernel` asks the FMM to evaluate at ~`order+1` times more targets than it uses, in both directions |
+| F7 | Low | Performance | `PulseKernel` asks the FMM to evaluate at every point rather than only the collocation targets; measured cost ~9 % of FMM time |
+| F13 | Medium | Pulse performance | The Pulse dense assembly does not scale with `assembly_threads`: 1.02× at two threads and 0.70× at four, where Galerkin gets 1.57×/1.63× on the same box |
 | F8 | Cosmetic | Maintainability | Three "docstrings" in `operators.py` are dead string expressions placed after the first statement |
 | F9 | Low | Packaging | `twod/nystrom.py` imports `psutil` unguarded although the requirements declare it optional at runtime |
 | F10 | High | Galerkin + Pulse planning | `fmm/galerkin.near_pairs` passes an array radius to `cKDTree.query_ball_point`, which needs SciPy 1.9; older SciPy raises `TypeError: only size 1 arrays can be converted to Python scalars` |
@@ -308,19 +309,73 @@ away. Masking them out (`take = (orders == q) & ~near`) removes one full-order
 Gauss evaluation per near pair from every dense and compressed assembly. The
 near set is O(n) out of O(n²) entries, so the saving is modest, but it is free.
 
-### F7 — Pulse FMM evaluates roughly twice the targets it needs (Low, performance)
+### F7 — Pulse FMM evaluates at every point, not just the targets (Low, performance)
 
 `PulseKernel._point_apply` hands the native kernel a single list that is both
-the source and the target set. In the forward direction only the `n` midpoint
-potentials are used and the `n·order` Gauss-point values are discarded; in the
-adjoint direction the reverse. `twod/fmm/kernel.py:evaluate` always calls
-`hfmm2d_` with `nt = 0`, even though the routine accepts a distinct target list
-(`targ`, `ifpghtarg`). Splitting sources from targets would cut the evaluation
-work substantially and, as noted in F1, would remove the coincident-point
-hazard. The current design is deliberate (one plan reused for both directions);
-the comment in `twod/pulse/kernel.py:1-6` explains it. Worth revisiting if Pulse
-FMM throughput matters — the standalone benchmark already shows Pulse FMM
-losing to Pulse dense at 2 048 panels / 3 angles (13.80 s vs 2.12 s).
+the source and the target set, so the forward direction computes potentials at
+all `n*order` Gauss points and uses only the `n` midpoints (the adjoint does
+the reverse). `twod/fmm/kernel.py:evaluate` always calls `hfmm2d_` with
+`nt = 0`, although the routine accepts a distinct target list (`targ`,
+`ifpghtarg`).
+
+**Measured, not estimated.** Calling `hfmm2d_` directly with a real target list
+(sources = Gauss points, targets = midpoints, `ifpgh=0`) against the current
+combined call, one thread, eps 1e-10, order 8:
+
+| panels | all points are targets | collocation targets only | saving |
+|---|---:|---:|---:|
+| 2 048 | 2.040 s | 1.859 s | 8.9 % |
+| 8 192 | 8.548 s | 7.726 s | 9.6 % |
+
+The two agree to machine precision (max relative difference 9.2e-16 and 0.0).
+An earlier draft of this report guessed the saving was "roughly half"; it is
+about a tenth, because at this tolerance the FMM's cost is dominated by the
+translations rather than by evaluation at the extra points. Worth doing if Pulse
+FMM throughput matters — it would also have removed F1 by construction — but it
+is not the lever it looked like.
+
+### F13 — the Pulse dense assembly does not use its threads (Medium, performance)
+
+Same box (4 cores), same problem — a 2 048-panel PEC circle, 1 GHz, three
+angles, both polarizations, wall time for the whole solve:
+
+| `assembly_threads` | Galerkin dense | Pulse dense |
+|---|---:|---:|
+| 1 | 14.51 s | 6.60 s |
+| 2 | 9.24 s (1.57x) | 6.50 s (1.02x) |
+| 4 | 8.88 s (1.63x) | 9.44 s (**0.70x**) |
+
+Pulse is 2.2x faster than Galerkin on one thread, which is the advantage the
+release notes claim. But it gains nothing from a second thread and is *slower
+than serial* on four, at which point Galerkin overtakes it.
+
+The cause is the GIL, not memory bandwidth or core count: running **four
+concurrent single-threaded processes** finishes all four solves in 6.92 s wall,
+against 6.4 s for one alone — so the work parallelises across the four cores
+essentially perfectly when the interpreter lock is not shared.
+
+The mechanism is visible in the profile. `dense_matrix` tiles at 32 rows x 512
+columns, and `blocks()` splits each tile into 4 096-pair chunks and then into up
+to four graded-order groups plus the near set, each selected with a boolean
+mask. On a 1 024-panel run that is 1 520 `point_pairs` and 528 `near_pairs`
+calls across 64 tiles — roughly 32 short array calls per tile, each on a masked
+subset, so a large share of the time is GIL-held dispatch and temporary
+allocation rather than long ufunc stretches. `point_pairs` self time (0.319 s)
+is nearly as large as all the Bessel evaluation inside `green` (0.405 s) on that
+run.
+
+Galerkin does not have this problem because its far pass was written for buffer
+reuse: `_far_green_into`, `_far_hankel1_into` and `_axpy_into` in
+`operators.py` evaluate one tile's kernel directly into preallocated `out=`
+buffers (writing `y0`/`j0` straight into the halves of the complex result), so
+each tile is a few long GIL-releasing calls. The Pulse coefficient kernels have
+no equivalent.
+
+Fixing it means giving `pulse/coefficients` the same treatment — larger tiles,
+preallocated per-thread scratch, and `out=` Bessel evaluation — rather than any
+change to the discretization. Until then, `assembly_threads` above 2 is
+counter-productive for Pulse, and the release-note timings (four threads on an
+8-core machine) understate what Pulse could do.
 
 ### F8 — Three dead "docstrings" in `operators.py` (Cosmetic)
 
@@ -442,6 +497,53 @@ equation.
 
 ---
 
+## 2.1 Pulse efficiency: what holds up
+
+These were measured on the same 4-core box while investigating F13, and are
+recorded because they are the answers to "is anything unnecessarily built or
+held".
+
+**Vectorization.** There is no Python loop over element pairs anywhere hot.
+`blocks()` loops only over bounded chunks and over the (at most four) graded
+quadrature-order groups; `near_pairs` loops over the two split subintervals.
+The single per-panel Python loop is the self-term assignment in `near_pairs`,
+and the `lru_cache` keyed on a 12-significant-digit length collapses it to one
+adaptive integral per *distinct* panel length. Because GHOST meshes each
+straight primitive uniformly, that is the primitive count, not the panel count:
+a 2 048-panel reentrant mesh has **5** distinct lengths and spends 0.035 s on
+all its self terms. The cache design is well matched to the geometry model.
+
+**The self integral is cheap.** Switching it from `quad_vec` to `quad` on the
+real and imaginary parts (F11) turned out to be 7.4x faster as well as more
+portable — 252 integrand evaluations against 1 659, because QUADPACK's
+extrapolation handles the endpoint logarithm that `quad_vec`'s bisection has to
+chase. 0.66 s against 4.89 s for 400 distinct lengths, agreeing to 1.9e-15.
+
+**Nothing large is held unnecessarily.** For a 2 048-panel PEC circle the dense
+run peaks at 231 MiB against a 64 MiB matrix; the doubling is the matrix plus
+its LU (`lu_factor` is called without `overwrite_a`), and the matrix is
+deliberately retained for the unscaled residual check. Galerkin peaks higher on
+the same problem (276 MiB). The FMM path keeps 1.3 MiB of near operators at
+2 048 panels and 2.5 MiB at 4 096, against 64 and 256 MiB dense — the ~89 % RAM
+reduction in the release notes holds. `PulseKernel` does keep both `near` and
+`correction` per kind, doubling near storage, but that is 1.3 MiB and not worth
+restructuring.
+
+**FMM Python overhead is negligible.** 95.5 % of a 24.5 s, 2 048-panel FMM run
+is inside the native `evaluate`; `_point_apply`'s own time is 0.008 s. Whatever
+is slow about Pulse FMM at small panel counts (the release notes already say it
+loses to dense at 2 048 panels / three angles) is the native kernel and the
+iteration count, not the Python wrapper.
+
+**Small waste, not worth changing.** `PulseOracle.get_with_error` allocates a
+same-shape zero array for the error estimate that `dense_matrix` immediately
+discards, and `blocks()` copies through a `chunk` dict before writing into the
+result slice. Both are inside `get_with_error`'s 0.017 s of a 1.93 s run.
+`apply(adjoint=True)` rebuilds `correction.conj().T` on every call, but the
+adjoint is only used for condition estimation.
+
+---
+
 ## 3. Verified correct
 
 These were checked rather than assumed, and they matter because they rule out
@@ -531,6 +633,10 @@ python checks2.py   # self-block series and Maue identity verification
 python verify_fixes.py  # F10/F11 fixes: fallback equivalence and quad accuracy
 python legacy_sim.py    # F10/F11/F12: both discretizations on dense, compressed
                         # and FMM with every post-SciPy-1.0 API removed
+python prof.py 1024 dense   # §2.1 profile (also: prof.py 2048 fmm)
+python selfint.py           # §2.1 self-integral quad vs quad_vec
+python targets.py           # F7 split source/target measurement
+python one.py dense 2048 4  # F13 one timed solve: mode, panels, threads
 ```
 
 `common.py` holds the shared harness (it reuses the repo's own
