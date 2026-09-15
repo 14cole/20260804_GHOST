@@ -1,0 +1,5 @@
+reference TE amplitude (4.397294522804881-4.604074709468292j)  |ref| 6.366608441757302
+galerkin  certified=False err=3.465e-04 cond=72895.4542440548 gate=True
+galerkin  certified=True  err=1.375e-04 cond=73628.80884393962 gate=True
+pulse     certified=False err=1.239e+00 cond=1726.1505561449346 gate=True
+pulse     certified=True  RAISED ValueError: Certified 2-D mesh convergence failed: RMS normalized complex-field delta 0.0542346 exceeds limit 0.02; Max normalized complex-field delta 0.0542346 exceeds limit 0.05

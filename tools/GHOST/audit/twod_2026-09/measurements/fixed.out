@@ -1,0 +1,33 @@
+pec reference panels 1536
+  galerkin panels/side=  1  n=   24  TM 2.200e-04  TE 3.578e-04
+  galerkin panels/side=  2  n=   48  TM 4.326e-05  TE 9.544e-05
+  galerkin panels/side=  4  n=   96  TM 1.454e-05  TE 2.286e-05
+  galerkin panels/side=  8  n=  192  TM 4.612e-06  TE 5.968e-06
+  galerkin panels/side= 16  n=  384  TM 1.454e-06  TE 1.535e-06
+  pulse    panels/side=  1  n=   24  TM 6.795e-03  TE 1.410e-02
+  pulse    panels/side=  2  n=   48  TM 1.963e-03  TE 7.163e-03
+  pulse    panels/side=  4  n=   96  TM 5.636e-04  TE 3.674e-03
+  pulse    panels/side=  8  n=  192  TM 1.612e-04  TE 1.827e-03
+  pulse    panels/side= 16  n=  384  TM 4.587e-05  TE 8.876e-04
+ibc reference panels 1536
+  galerkin panels/side=  1  n=   24  TM 1.716e-04  TE 4.468e-04
+  galerkin panels/side=  2  n=   48  TM 1.918e-05  TE 1.108e-04
+  galerkin panels/side=  4  n=   96  TM 5.706e-07  TE 2.683e-05
+  galerkin panels/side=  8  n=  192  TM 1.099e-06  TE 6.972e-06
+  galerkin panels/side= 16  n=  384  TM 5.773e-07  TE 1.798e-06
+  pulse    panels/side=  1  n=   24  TM 8.826e-03  TE 1.278e-02
+  pulse    panels/side=  2  n=   48  TM 3.982e-03  TE 8.490e-03
+  pulse    panels/side=  4  n=   96  TM 1.874e-03  TE 4.719e-03
+  pulse    panels/side=  8  n=  192  TM 8.920e-04  TE 2.420e-03
+  pulse    panels/side= 16  n=  384  TM 4.239e-04  TE 1.193e-03
+lossy reference panels 1536
+  galerkin panels/side=  1  n=   24  TM 6.699e-04  TE 1.108e-03
+  galerkin panels/side=  2  n=   48  TM 5.536e-04  TE 6.435e-04
+  galerkin panels/side=  4  n=   96  TM 1.155e-04  TE 1.197e-04
+  galerkin panels/side=  8  n=  192  TM 2.874e-05  TE 2.649e-05
+  galerkin panels/side= 16  n=  384  TM 6.993e-06  TE 6.187e-06
+  pulse    panels/side=  1  n=   24  TM 2.042e-01  TE 1.634e-01
+  pulse    panels/side=  2  n=   48  TM 1.076e-01  TE 7.698e-02
+  pulse    panels/side=  4  n=   96  TM 5.636e-02  TE 3.863e-02
+  pulse    panels/side=  8  n=  192  TM 2.934e-02  TE 1.983e-02
+  pulse    panels/side= 16  n=  384  TM 1.526e-02  TE 1.032e-02

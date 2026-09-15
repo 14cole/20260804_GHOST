@@ -1,0 +1,6 @@
+TM/Dirichlet ka=2.4048   gal/den 6.27e-05  gal/fmm 6.21e-05  pul/den 8.93e-05  pul/fmm 8.93e-05
+TM/Dirichlet ka=5.5201   gal/den 1.42e-04  gal/fmm 1.41e-04  pul/den 2.01e-04  pul/fmm 2.01e-04
+TM/Dirichlet ka=3.8317   gal/den 9.91e-05  gal/fmm 9.81e-05  pul/den 1.41e-04  pul/fmm 1.41e-04
+TE/Neumann  ka=1.8412    gal/den 3.84e-05  gal/fmm 3.84e-05  pul/den 3.02e-03  pul/fmm 3.02e-03
+TE/Neumann  ka=3.0542    gal/den 6.67e-05  gal/fmm 6.67e-05  pul/den 1.65e-03  pul/fmm 1.65e-03
+TE/Neumann  ka=3.8317    gal/den 3.46e-04  gal/fmm 3.46e-04  pul/den 1.24e+00  pul/fmm 1.24e+00

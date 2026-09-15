@@ -409,7 +409,9 @@ python checks2.py   # self-block series and Maue identity verification
 
 `common.py` holds the shared harness (it reuses the repo's own
 `test_2d_capability_acceptance._circle/_segment` fixtures and
-`ghost_backend.validation.cylinder` analytic references).
+`ghost_backend.validation.cylinder` analytic references). The console output
+captured for this report is in `measurements/`, one file per script, plus
+`measurements/test_suite.out` for the wider regression sweep.
 
 ---
 

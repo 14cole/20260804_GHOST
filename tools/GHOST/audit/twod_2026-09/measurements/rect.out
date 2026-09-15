@@ -1,0 +1,65 @@
+pec reference panel count 1024
+  galerkin panels/side= 12 n=  48  TM 1.433e-02  TE 6.097e-02
+  galerkin panels/side= 24 n=  96  TM 5.453e-03  TE 1.755e-02
+  galerkin panels/side= 48 n= 192  TM 1.991e-03  TE 5.635e-03
+  galerkin panels/side= 96 n= 384  TM 6.395e-04  TE 1.711e-03
+  pulse    panels/side= 12 n=  48  TM 1.327e-01  TE 2.955e-01
+  pulse    panels/side= 24 n=  96  TM 4.981e-02  TE 1.033e-01
+  pulse    panels/side= 48 n= 192  TM 1.992e-02  TE 5.371e-02
+  pulse    panels/side= 96 n= 384  TM 8.039e-03  TE 3.211e-02
+lossy reference panel count 1024
+Traceback (most recent call last):
+  File "/tmp/claude-0/-home-user-20260804-GHOST/0cdd1fcb-ee51-5d3f-afd8-62dd0abe9bc9/scratchpad/audit/rect.py", line 19, in <module>
+    r=run(rect(panels,kind),F,[30.],disc=disc)
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/claude-0/-home-user-20260804-GHOST/0cdd1fcb-ee51-5d3f-afd8-62dd0abe9bc9/scratchpad/audit/common.py", line 26, in run
+    return s.solve_monostatic_rcs_2d(snapshot,[freq_ghz],list(angles),geometry_units='meters',
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/20260804_GHOST/tools/GHOST/ghost_backend/twod/preparation.py", line 30, in call
+    return function(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/20260804_GHOST/tools/GHOST/ghost_backend/execution/options.py", line 428, in call
+    return invoke_configured(*args,**kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/20260804_GHOST/tools/GHOST/ghost_backend/execution/options.py", line 387, in invoke_configured
+    result = invoke()
+             ^^^^^^^^
+  File "/home/user/20260804_GHOST/tools/GHOST/ghost_backend/execution/options.py", line 370, in invoke
+    result=function(*args,**kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/20260804_GHOST/tools/GHOST/ghost_backend/execution/metrics.py", line 188, in measured
+    result = function(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/20260804_GHOST/tools/GHOST/ghost_backend/execution/cpu.py", line 113, in call
+    result = function(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/20260804_GHOST/tools/GHOST/ghost_backend/twod/assembly/session.py", line 68, in call
+    result = function(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/20260804_GHOST/tools/GHOST/ghost_backend/twod/solver.py", line 3078, in solve_monostatic_rcs_2d
+    channel_results[export_pol] = solve_monostatic_rcs_2d_single_polarization(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/20260804_GHOST/tools/GHOST/ghost_backend/twod/preparation.py", line 30, in call
+    return function(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/20260804_GHOST/tools/GHOST/ghost_backend/execution/options.py", line 428, in call
+    return invoke_configured(*args,**kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/20260804_GHOST/tools/GHOST/ghost_backend/execution/options.py", line 387, in invoke_configured
+    result = invoke()
+             ^^^^^^^^
+  File "/home/user/20260804_GHOST/tools/GHOST/ghost_backend/execution/options.py", line 370, in invoke
+    result=function(*args,**kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/20260804_GHOST/tools/GHOST/ghost_backend/execution/metrics.py", line 183, in measured
+    return function(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/20260804_GHOST/tools/GHOST/ghost_backend/execution/cpu.py", line 109, in call
+    return function(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/20260804_GHOST/tools/GHOST/ghost_backend/twod/solver.py", line 2033, in solve_monostatic_rcs_2d_single_polarization
+    panels = _build_panels(
+             ^^^^^^^^^^^^^^
+  File "/home/user/20260804_GHOST/tools/GHOST/ghost_backend/twod/geometry.py", line 1321, in _build_panels
+    raise ValueError(
+ValueError: Segment 'body' explicit N=12 under-resolves a 0.6 m primitive at the controlling wavelength 0.173037 m: at least N=14 is required for the gross 4-panels-per-wavelength safety floor. Increase N or use N=0 for automatic material-wavelength meshing. Production results still require base/fine mesh convergence.

@@ -1,0 +1,12 @@
+requested 6 -> kernel order 6 policy explicit_minimum
+   min |quad - center| = 0.0008749370156383857
+   matvec rel err vs dense: 3.0419475731758145e-12 finite: True
+requested 7 -> kernel order 7 policy explicit_minimum
+   min |quad - center| = 0.0
+   matvec rel err vs dense: 0.011221445243168461 finite: True
+requested 8 -> kernel order 8 policy explicit_minimum
+   min |quad - center| = 0.0006725936891507148
+   matvec rel err vs dense: 7.27604747284906e-12 finite: True
+requested 9 -> kernel order 9 policy explicit_minimum
+   min |quad - center| = 0.0
+   matvec rel err vs dense: 0.00886632710571319 finite: True

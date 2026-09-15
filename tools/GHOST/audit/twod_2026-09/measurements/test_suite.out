@@ -1,0 +1,65 @@
+.............................................................. [ 65%]
+..............FF................                       [100%]
+=================================== FAILURES ===================================
+_____ NystromTests.test_circle_both_polarizations_and_dirichlet_resonance ______
+
+self = <test_nystrom.NystromTests testMethod=test_circle_both_polarizations_and_dirichlet_resonance>
+
+    def test_circle_both_polarizations_and_dirichlet_resonance(self):
+        for k in (1.,5.,10.,30.):
+            for pol in ('TM','TE'):
+>               value=solve_smooth_pec(ellipse(.3,.3),256,k/.3,[0,23,91],pol)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+ghost_backend/tests/test_nystrom.py:15: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+ghost_backend/twod/nystrom.py:72: in solve_smooth_pec
+    S,K,KP,x,normal,weights=operators(curve,count,k,memory_gib)
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+curve = <function ellipse.<locals>.curve at 0x7f37edac4f40>, count = 256
+k = 3.3333333333333335, memory_gib = None
+
+    def operators(curve, count, k, memory_gib=None):
+        if type(count) is not int or count<8 or count%2:
+            raise ValueError('Nystr\xf6m needs an even node count of at least eight.')
+        if not np.isfinite(k) or k<=0:raise ValueError('The exterior wavenumber must be positive and real.')
+        if memory_gib is None:
+>           import psutil
+E           ModuleNotFoundError: No module named 'psutil'
+
+ghost_backend/twod/nystrom.py:19: ModuleNotFoundError
+__________ NystromTests.test_ellipse_refinement_and_translation_phase __________
+
+self = <test_nystrom.NystromTests testMethod=test_ellipse_refinement_and_translation_phase>
+
+    def test_ellipse_refinement_and_translation_phase(self):
+        angles=np.array([0,19,80,170]);k=8.
+        shift=np.array([.3,-.5])
+>       a=solve_smooth_pec(ellipse(1.,.6),128,k,angles)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+ghost_backend/tests/test_nystrom.py:26: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+ghost_backend/twod/nystrom.py:72: in solve_smooth_pec
+    S,K,KP,x,normal,weights=operators(curve,count,k,memory_gib)
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+curve = <function ellipse.<locals>.curve at 0x7f37e91ed940>, count = 128
+k = 8.0, memory_gib = None
+
+    def operators(curve, count, k, memory_gib=None):
+        if type(count) is not int or count<8 or count%2:
+            raise ValueError('Nystr\xf6m needs an even node count of at least eight.')
+        if not np.isfinite(k) or k<=0:raise ValueError('The exterior wavenumber must be positive and real.')
+        if memory_gib is None:
+>           import psutil
+E           ModuleNotFoundError: No module named 'psutil'
+
+ghost_backend/twod/nystrom.py:19: ModuleNotFoundError
+=========================== short test summary info ============================
+FAILED ghost_backend/tests/test_nystrom.py::NystromTests::test_circle_both_polarizations_and_dirichlet_resonance
+FAILED ghost_backend/tests/test_nystrom.py::NystromTests::test_ellipse_refinement_and_translation_phase
+2 failed, 92 passed, 28 subtests passed in 307.19s (0:05:07)
