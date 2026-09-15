@@ -58,6 +58,11 @@ available in this integrated version.
   cached equal-length self integrals with length correction, bounded parallel
   tiles and real-Bessel fast paths. Guarded 2/3/4-point far rules reduce dense
   and compressed integration work; `far_grading=False` disables that reduction.
+  Coefficient chunks are sized from a per-thread scratch budget rather than a
+  fixed pair count, and each assembly task spans about one chunk, so
+  `assembly_threads` now scales the dense assembly (about 3.5x on four cores)
+  instead of stalling it. Chunking is a blocking choice only: the assembled
+  coefficients are unchanged.
 - Pulse FMM uses full source quadrature and distinct midpoint targets. Its
   adjoint exchanges source/testing maps explicitly. Native plans and sparse
   near primitives are reused across polarizations. Panel far-field moments use

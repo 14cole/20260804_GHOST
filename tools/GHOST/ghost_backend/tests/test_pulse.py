@@ -13,7 +13,8 @@ from ghost_backend.execution.policy import native_fmm_available
 from ghost_backend.twod import solver as s
 from ghost_backend.twod.pulse.kernel import PulseKernel,PulseSystem
 from ghost_backend.twod.pulse.runtime import PulseOracle,dense_matrix
-from ghost_backend.twod.pulse.coefficients import accurate_pairs,blocks,self_single_layer
+from ghost_backend.twod.pulse import coefficients as pulse_coefficients
+from ghost_backend.twod.pulse.coefficients import accurate_pairs,blocks,chunk_pairs,self_single_layer
 from ghost_backend.twod.assembly.geometry_plan import AssemblyGeometry
 from test_near_separation import pair_mesh
 from test_fmm_efficiency import mesh_for
@@ -100,6 +101,42 @@ def test_self_integral_cache_preserves_actual_panel_length(k):
         expected,_=quad_vec(lambda t:.5j*length*hankel2(0,k*length*t),
                             0,.5,epsabs=1e-14,epsrel=1e-13)
         np.testing.assert_allclose(self_single_layer(k,length),expected,rtol=2e-12,atol=1e-15)
+
+
+def test_assembly_chunking_is_a_blocking_choice_only():
+    # Chunk size decides how much work sits inside one ufunc call, which is what
+    # lets the dense assembly use its threads -- below roughly half a million
+    # (pairs x order) elements four threads were no faster than one. It must
+    # never change a coefficient, and it must stay on the fast side of that knee.
+    mesh, k = mesh_for('reentrant', 128, 3.)
+    g = AssemblyGeometry(mesh)
+    rows, cols = np.arange(48), np.arange(128)
+    reference = None
+    for chunk in (512, 4096, 1 << 20):
+        with patch.object(pulse_coefficients, 'chunk_pairs', lambda order, kinds=3, v=chunk: v):
+            result = blocks(g, k, rows, cols, {'S', 'KP', 'K'}, 8, True)
+        if reference is None:
+            reference = result
+        else:
+            for kind in reference:
+                np.testing.assert_array_equal(result[kind], reference[kind])
+    for order in (6, 8, 12):
+        for kinds in (1, 2, 3):
+            assert chunk_pairs(order, kinds)*order >= 1 << 19
+
+
+def test_assembly_tasks_span_a_chunk_and_still_balance():
+    from ghost_backend.twod.pulse.runtime import _row_block_rows
+
+    class Oracle:
+        def __init__(self, order):
+            self.system = type('S', (), {'kernels': [type('K', (), {'order': order})()]})()
+    for n in (256, 2048, 8192):
+        for threads in (1, 4, 16):
+            span = _row_block_rows(Oracle(8), n, threads)
+            assert 1 <= span <= n
+            # several tasks per thread so the pool balances
+            assert -(-n//span) >= min(n, 4*threads) or span == 1
 
 
 @native

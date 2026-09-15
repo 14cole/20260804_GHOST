@@ -6,7 +6,7 @@ factorization backends), plus the compressed/FMM oracles that share those
 operators.
 
 Status: the audit itself was read-only; a follow-up commit on this branch then
-fixed F1, F6, F8, F9, F10, F11 and F12 (see §1.1). F2, F3 and F4 are left open
+fixed F1, F6, F8, F9, F10, F11, F12 and F13 (see §1.1). F2, F3 and F4 are left open
 because each is a design decision, not a defect to patch.
 
 Environment used for the measurements: Linux, CPython 3.11.15, NumPy 2.4.6,
@@ -38,7 +38,7 @@ re-ran byte-identical.
 | F5 | Low | Docs/API | `fmm_quadrature_order` accepts 6…64 although only even orders are safe for Pulse (see F1) |
 | F6 | Low | Performance | `pulse/coefficients.blocks` evaluates every near pair twice and discards the first result |
 | F7 | Low | Performance | `PulseKernel` asks the FMM to evaluate at every point rather than only the collocation targets; measured cost ~9 % of FMM time |
-| F13 | Medium | Pulse performance | The Pulse dense assembly does not scale with `assembly_threads`: 1.02× at two threads and 0.70× at four, where Galerkin gets 1.57×/1.63× on the same box |
+| F13 | Medium | Pulse performance | The Pulse dense assembly did not scale with `assembly_threads` (1.02× at two, 0.70× at four); chunk granularity, now fixed — 1.58×/2.16×, and the 4-thread solve is 3.1× faster |
 | F8 | Cosmetic | Maintainability | Three "docstrings" in `operators.py` are dead string expressions placed after the first statement |
 | F9 | Low | Packaging | `twod/nystrom.py` imports `psutil` unguarded although the requirements declare it optional at runtime |
 | F10 | High | Galerkin + Pulse planning | `fmm/galerkin.near_pairs` passes an array radius to `cKDTree.query_ball_point`, which needs SciPy 1.9; older SciPy raises `TypeError: only size 1 arrays can be converted to Python scalars` |
@@ -59,6 +59,7 @@ the problems can be.
 | F10 | `_query_balls()` falls back to one scalar-radius query per distinct radius when SciPy rejects an array `r`, detected once and cached. |
 | F11 | `_self_integral` integrates the real and imaginary parts with `scipy.integrate.quad`; verified to 6.3e-15 against `quad_vec` for k from 1e-3 to 200 and panel lengths from 1e-4 to 3 m. |
 | F12 | `_krylov_kwargs()` builds the tolerance/callback keywords from the solver's own signature (the idiom `compressed/factor.py:80` already used), `_equation_operator()` drops `rmatmat` when SciPy will not take it, and the stable sort asks for `'mergesort'`. |
+| F13 | `chunk_pairs()` sizes the coefficient chunk from a per-thread scratch budget and `_row_block_rows()` matches the assembly task to it. Four-thread dense assembly went from 1.03× to 3.49×, the whole solve from 0.70× to 2.16×, and the result is bit-identical. |
 
 F2 (Pulse convergence rate), F3 (TE interior resonances) and F4 (backend-dependent
 TM PEC formulation) are **not** fixed here: each needs a decision about what the
@@ -334,48 +335,80 @@ translations rather than by evaluation at the extra points. Worth doing if Pulse
 FMM throughput matters — it would also have removed F1 by construction — but it
 is not the lever it looked like.
 
-### F13 — the Pulse dense assembly does not use its threads (Medium, performance)
+### F13 — the Pulse dense assembly did not use its threads (Medium, performance)
 
 Same box (4 cores), same problem — a 2 048-panel PEC circle, 1 GHz, three
 angles, both polarizations, wall time for the whole solve:
 
-| `assembly_threads` | Galerkin dense | Pulse dense |
-|---|---:|---:|
-| 1 | 14.51 s | 6.60 s |
-| 2 | 9.24 s (1.57x) | 6.50 s (1.02x) |
-| 4 | 8.88 s (1.63x) | 9.44 s (**0.70x**) |
+| `assembly_threads` | Galerkin dense | Pulse dense (before) | Pulse dense (after) |
+|---|---:|---:|---:|
+| 1 | 14.51 s | 6.60 s | 6.54 s |
+| 2 | 9.24 s (1.57x) | 6.50 s (1.02x) | 4.14 s (1.58x) |
+| 4 | 8.88 s (1.63x) | 9.44 s (**0.70x**) | **3.03 s (2.16x)** |
 
-Pulse is 2.2x faster than Galerkin on one thread, which is the advantage the
-release notes claim. But it gains nothing from a second thread and is *slower
-than serial* on four, at which point Galerkin overtakes it.
+Pulse was 2.2x faster than Galerkin on one thread, gained nothing from a second
+thread and was *slower than serial* on four, at which point Galerkin overtook
+it. It is now 3.0x faster than Galerkin at four threads, and the four-thread
+solve is 3.1x faster than it was. At 4 096 panels the same run went from
+30.52 s to 13.55 s with slightly lower peak memory.
 
-The cause is the GIL, not memory bandwidth or core count: running **four
-concurrent single-threaded processes** finishes all four solves in 6.92 s wall,
-against 6.4 s for one alone — so the work parallelises across the four cores
-essentially perfectly when the interpreter lock is not shared.
+**Diagnosis.** Not memory bandwidth and not core count: four concurrent
+single-threaded *processes* finished four solves in 6.92 s wall against 6.4 s
+for one alone, so the work parallelised across the four cores essentially
+perfectly when the interpreter lock was not shared. Measuring layer by layer
+found the boundary precisely — `green()` scaled 2.63x on four threads and
+`point_pairs()` 3.29x, but `blocks()` *regressed* to 0.66x:
 
-The mechanism is visible in the profile. `dense_matrix` tiles at 32 rows x 512
-columns, and `blocks()` splits each tile into 4 096-pair chunks and then into up
-to four graded-order groups plus the near set, each selected with a boolean
-mask. On a 1 024-panel run that is 1 520 `point_pairs` and 528 `near_pairs`
-calls across 64 tiles — roughly 32 short array calls per tile, each on a masked
-subset, so a large share of the time is GIL-held dispatch and temporary
-allocation rather than long ufunc stretches. `point_pairs` self time (0.319 s)
-is nearly as large as all the Bessel evaluation inside `green` (0.405 s) on that
-run.
+| layer (4 threads) | speedup |
+|---|---:|
+| scipy `y0`/`j0` ufuncs alone | 1.89x |
+| `green()` | 2.63x |
+| `point_pairs()`, 16 k pairs in one call | 3.29x |
+| `blocks()` on a 32x512 tile | 0.66x |
 
-Galerkin does not have this problem because its far pass was written for buffer
-reuse: `_far_green_into`, `_far_hankel1_into` and `_axpy_into` in
-`operators.py` evaluate one tile's kernel directly into preallocated `out=`
-buffers (writing `y0`/`j0` straight into the halves of the complex result), so
-each tile is a few long GIL-releasing calls. The Pulse coefficient kernels have
-no equivalent.
+The near path was not the cause either: on a whole matrix the near pairs are
+0.31 % of the entries and about 0.3 s of a 6.4 s run, and batching them
+differently is worth only ~17 %. The cause was **array size per call**.
+`blocks()` chunked at a fixed 4 096 pairs, and the graded far rule then split
+each chunk into up to four order groups, so the assembly ran as a stream of
+short ufunc calls that spend their time holding the interpreter lock rather
+than releasing it. Sweeping the chunk size on the real kernels shows a sharp
+knee, with results identical at every size:
 
-Fixing it means giving `pulse/coefficients` the same treatment — larger tiles,
-preallocated per-thread scratch, and `out=` Bessel evaluation — rather than any
-change to the discretization. Until then, `assembly_threads` above 2 is
-counter-productive for Pulse, and the release-note timings (four threads on an
-8-core machine) understate what Pulse could do.
+| pairs per chunk | 1 thread | 4 threads | speedup | scratch (4 threads) |
+|---|---:|---:|---:|---:|
+| 4 096 (old) | 3.94 s | 9.05 s | 0.44x | 53.9 MiB |
+| 16 384 | 3.27 s | 3.65 s | 0.90x | 68.7 MiB |
+| 32 768 | 3.56 s | 2.11 s | 1.69x | 88.1 MiB |
+| 65 536 | 3.73 s | 1.32 s | 2.83x | 123.8 MiB |
+| 131 072 | 3.62 s | 1.28 s | 2.83x | 204.0 MiB |
+| 262 144 | 3.51 s | 1.20 s | 2.93x | 369.8 MiB |
+
+**Fixed on this branch.** `coefficients.chunk_pairs(order, kinds)` sizes the
+chunk from a per-thread scratch budget instead of a fixed 4 096, and
+`runtime._row_block_rows` sizes each assembly task to span about one chunk
+(a whole row span, still leaving several tasks per thread for balance). The
+32x512 tile could never have held a chunk this large, so both had to change
+together.
+
+The budget is `SCRATCH_BYTES_PER_THREAD`, and `_estimate_memory_gb` imports
+that same constant rather than repeating a number, so the admission estimate
+cannot drift from what the assembly actually takes. It was raised from the
+previous 16 MiB per thread to 48 MiB; the measured worst case is 44.7 MiB per
+thread with all three operator kinds requested, and peak RSS for the 2 048-panel
+solve rose from 241 MiB to 288 MiB.
+
+**The rewrite is bit-identical**, which is the point of chunking being a
+blocking decision rather than a numerical one: `verify.py` rebuilds the matrix
+with the old 32x512 / 4 096-pair tiling and asserts `array_equal` against the
+new path for both the two-kind and three-kind operator sets. The multi-region
+route, which goes through a different oracle path, gains 1.93x (dielectric) and
+2.50x (coated) with fields identical between one and four threads.
+
+Two things this did *not* need: any change to the discretization, and the
+buffer-reuse kernels (`_far_green_into` and friends) that the Galerkin far pass
+uses. Those would reduce the serial time; the thread scaling was purely a
+granularity problem.
 
 ### F8 — Three dead "docstrings" in `operators.py` (Cosmetic)
 

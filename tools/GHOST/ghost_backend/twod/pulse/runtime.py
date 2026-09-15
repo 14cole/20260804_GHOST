@@ -166,19 +166,32 @@ class PulseOracle:
         return value,np.zeros(value.shape)
 
 
+def _row_block_rows(oracle,n,threads):
+    """Rows per assembly task, so one task spans about one coefficient chunk.
+
+    A whole row span per task keeps each chunk large enough to stay inside long
+    ufunc calls; the second term still leaves several tasks per thread so the
+    pool balances.
+    """
+    from ghost_backend.twod.pulse.coefficients import chunk_pairs
+    orders=[k.order for k in oracle.system.kernels] or [8]
+    rows=max(1,chunk_pairs(max(orders))//max(1,n))
+    return max(1,min(rows,n,-(-n//(4*max(1,threads)))))
+
+
 @timed_stage('operator_assembly')
 def dense_matrix(oracle,checkpoint):
     n=oracle.n;matrix=np.empty((n,n),complex,order='F')
-    def row_block(start):
-        rows=np.arange(start,min(start+32,n))
-        for j in range(0,n,512):
-            checkpoint();cols=np.arange(j,min(j+512,n))
-            matrix[start:start+len(rows),j:j+len(cols)]=oracle.get_with_error(rows,cols)[0]
     threads=effective_assembly_threads()
+    span=_row_block_rows(oracle,n,threads)
+    columns=np.arange(n)
+    def row_block(start):
+        checkpoint();rows=np.arange(start,min(start+span,n))
+        matrix[start:start+len(rows)]=oracle.get_with_error(rows,columns)[0]
     if threads>1:
-        with ThreadPoolExecutor(max_workers=threads) as pool:list(pool.map(row_block,range(0,n,32)))
+        with ThreadPoolExecutor(max_workers=threads) as pool:list(pool.map(row_block,range(0,n,span)))
     else:
-        for i in range(0,n,32):row_block(i)
+        for i in range(0,n,span):row_block(i)
     return matrix
 
 

@@ -1294,7 +1294,11 @@ def _estimate_memory_gb(
     if resources.get('discretization')=='pulse' and factorization!='compressed':
         # P0 point testing stores no regional dense matrices. Assembly uses
         # bounded source tiles; retain A alongside LU for residual checks.
-        peak=2*matrix+16*16*d*batch+(64+16*get_assembly_threads())*1024**2
+        # One coefficient chunk per assembly thread, sized by the same budget
+        # the chunk itself uses, so the estimate cannot drift from the code.
+        from ghost_backend.twod.pulse.coefficients import SCRATCH_BYTES_PER_THREAD
+        peak=(2*matrix+16*16*d*batch+64*1024**2
+              +SCRATCH_BYTES_PER_THREAD*get_assembly_threads())
         if factorization in ('hierarchical','auto'):
             from ghost_backend.linalg.hierarchical import factor_storage_budget
             peak+=factor_storage_budget(matrix)

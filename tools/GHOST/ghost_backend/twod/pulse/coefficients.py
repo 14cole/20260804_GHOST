@@ -133,13 +133,42 @@ def accurate_pairs(g,k,rows,cols,kinds):
     return high
 
 
+SCRATCH_BYTES_PER_THREAD=48*1024**2
+_BYTES_PER_PAIR_NODE=56
+_BYTES_PER_PAIR_NODE_KIND=8
+_MIN_CHUNK=4096
+
+
+def chunk_pairs(order,kinds=3):
+    """Pairs per coefficient chunk, bounded by one thread's assembly scratch.
+
+    A chunk's working set is dominated by the (pairs x order) kernel arrays --
+    displacement, radius, the two Hankel terms and the projections -- so that
+    product is what the budget bounds, with a per-kind term for the extra
+    projection each requested operator needs.
+
+    Size matters beyond cache. A chunk is the unit of work inside one ufunc
+    call, and short calls leave the assembly holding the interpreter lock, which
+    is what stopped the dense assembly using its threads: below roughly half a
+    million (pairs x order) elements the four-thread assembly was no faster than
+    one thread. ``kinds`` defaults to the largest count so a caller that does
+    not know it still gets a chunk the budget covers.
+
+    Chunking never changes a coefficient: every pair is evaluated identically
+    whichever chunk it lands in.
+    """
+    node=_BYTES_PER_PAIR_NODE+_BYTES_PER_PAIR_NODE_KIND*max(1,int(kinds))
+    return max(_MIN_CHUNK,int(SCRATCH_BYTES_PER_THREAD//(node*max(1,int(order)))))
+
+
 def blocks(g,k,rows,cols,kinds,order,graded=False):
     """Bounded coefficient query shared by dense, compressed and FMM routes."""
     rows=np.asarray(rows,int);cols=np.asarray(cols,int)
     rr=np.repeat(rows,len(cols));cc=np.tile(cols,len(rows))
     result={kind:np.empty(len(rr),complex) for kind in kinds}
-    for start in range(0,len(rr),4096):
-        stop=min(len(rr),start+4096);r=rr[start:stop];c=cc[start:stop]
+    step=chunk_pairs(order,len(kinds))
+    for start in range(0,len(rr),step):
+        stop=min(len(rr),start+step);r=rr[start:stop];c=cc[start:stop]
         distance=np.linalg.norm(g.centers[r]-g.centers[c],axis=1)
         near=distance<=3*np.maximum(g.lengths[r],g.lengths[c])
         orders=np.full(len(r),order)
