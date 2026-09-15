@@ -3,7 +3,11 @@
 Date: 2026-09-15
 Scope: `tools/GHOST/ghost_backend/twod/**` (both discretizations, all three
 factorization backends), plus the compressed/FMM oracles that share those
-operators. Read-only audit: no solver source was modified on this branch.
+operators.
+
+Status: the audit itself was read-only; a follow-up commit on this branch then
+fixed F1, F6, F8, F9, F10 and F11 (see §1.1). F2, F3 and F4 are left open
+because each is a design decision, not a defect to patch.
 
 Environment used for the measurements: Linux, CPython 3.11.15, NumPy 2.4.6,
 SciPy 1.17.1. `twod/fmm/native` and `twod/assembly/native` were built from the
@@ -32,9 +36,26 @@ failures are F9 below (a missing *optional* dependency), not solver defects.
 | F7 | Low | Performance | `PulseKernel` asks the FMM to evaluate at ~`order+1` times more targets than it uses, in both directions |
 | F8 | Cosmetic | Maintainability | Three "docstrings" in `operators.py` are dead string expressions placed after the first statement |
 | F9 | Low | Packaging | `twod/nystrom.py` imports `psutil` unguarded although the requirements declare it optional at runtime |
+| F10 | High | Galerkin + Pulse planning | `fmm/galerkin.near_pairs` passes an array radius to `cKDTree.query_ball_point`, which needs SciPy 1.9; older SciPy raises `TypeError: only size 1 arrays can be converted to Python scalars` |
+| F11 | High | Pulse | `pulse/coefficients` imports `scipy.integrate.quad_vec`, which needs SciPy 1.4, for a scalar integrand |
 
 Verified-correct items are listed in §3; they matter because they bound where
 the problems can be.
+
+### 1.1 Fixes applied on this branch
+
+| # | Change |
+|---|---|
+| F1 | `PulseKernel.__init__` rounds the effective quadrature order up to even (`twod/pulse/kernel.py`). Requesting order 7 now runs order 8 and 9 runs 10; the measured matvec error returns to ~5e-12 in every case. |
+| F6 | `blocks()` skips near entries in the point-rule pass instead of computing and overwriting them (`twod/pulse/coefficients.py`). Results are bit-identical. |
+| F8 | The three docstrings in `operators.py` moved above the first statement, so they are real `__doc__` again. |
+| F9 | `nystrom.operators` uses the solver's guarded `_detect_available_gb()` instead of importing psutil directly, and keeps the previous 8 GiB cap when no probe reports anything. |
+| F10 | `_query_balls()` falls back to one scalar-radius query per distinct radius when SciPy rejects an array `r`, detected once and cached. |
+| F11 | `_self_integral` integrates the real and imaginary parts with `scipy.integrate.quad`; verified to 6.3e-15 against `quad_vec` for k from 1e-3 to 200 and panel lengths from 1e-4 to 3 m. |
+
+F2 (Pulse convergence rate), F3 (TE interior resonances) and F4 (backend-dependent
+TM PEC formulation) are **not** fixed here: each needs a decision about what the
+product should do, not a patch.
 
 ---
 
@@ -81,9 +102,12 @@ Reachability:
 - Galerkin FMM is **not** affected: `GalerkinKernel` puts only Gauss points in
   the plan, with no midpoints.
 
-Suggested fixes, cheapest first:
+**Fixed on this branch** by option 1 below; requesting order 7 now runs order 8
+and 9 runs 10, and the matvec error returns to ~5e-12 in all four cases above.
+
+Fixes considered, cheapest first:
 1. Round the effective order up to even inside `PulseKernel.__init__`
-   (`self.order += self.order % 2`), and say so in the docstring.
+   (`self.order += self.order % 2`).
 2. Better: stop packing the midpoints into the source list. `hfmm2d_` already
    takes a separate target list (`nt`, `targ`, `ifpghtarg`) that
    `twod/fmm/kernel.py:evaluate` always passes as empty. Using it removes the
@@ -248,12 +272,14 @@ Either make the choice uniform across backends, or record the representation in
 metadata and document that dense/compressed Galerkin TM PEC is an EFIE with
 interior-resonance sensitivity in the density (not the far field).
 
-### F5 — `fmm_quadrature_order` validation permits unsafe odd orders (Low)
+### F5 — `fmm_quadrature_order` validation permits odd orders (Low)
 
-`execution/options.py:105-107` allows any integer in 6…64. Given F1, odd values
-are unsafe for `discretization='pulse'`. `PULSE_FMM_UPDATES.md` only exemplifies
-`fmm_quadrature_order=8`, so the exposure is small, but validation is the right
-place to close it.
+`execution/options.py:105-107` allows any integer in 6…64, and before the F1 fix
+odd values were unsafe for `discretization='pulse'`. With `PulseKernel` now
+rounding the effective order up to even, an odd request is honoured as the next
+even order rather than silently corrupting the product, so no validation change
+is needed. Recording it here because the rounding is the only thing keeping that
+input safe.
 
 ### F6 — `blocks()` computes every near pair twice (Low, performance)
 
@@ -295,8 +321,8 @@ losing to Pulse dense at 2 048 panels / 3 angles (13.80 s vs 2.12 s).
 `_sk_blocks_near_linear` (line 816), `_linear_element_incident_dn_load_many`
 (line 2297) and `_farfield_linear_density_many` (line 2338) each place their
 triple-quoted description *after* an early-return `if`, so it is a no-op string
-expression, not `__doc__`. `help()` and any doc tooling show nothing. Move each
-block above the first statement.
+expression, not `__doc__`. `help()` and any doc tooling show nothing.
+**Fixed on this branch**: each block moved above the first statement.
 
 ### F9 — `nystrom.py` hard-requires an optional dependency (Low)
 
@@ -314,8 +340,59 @@ if memory_gib is None:
 
 `memory_gib=None` is the default, so on a machine without psutil both
 `test_nystrom` cases fail with `ModuleNotFoundError` — which is exactly what
-happened in this audit environment. Fall back the same way `solver.py` does
-(or reuse `_detect_available_gb`).
+happened in this audit environment.
+**Fixed on this branch** by reusing the solver's guarded `_detect_available_gb()`,
+keeping the previous 8 GiB cap when no probe reports anything.
+
+### F10 — array-valued KD-tree radius needs SciPy 1.9 (High)
+
+`twod/fmm/galerkin.py` called
+
+```python
+candidates = tree.query_ball_point(centers[start:stop], 3*np.maximum(lengths[start:stop], upper))
+```
+
+Per-point (array-valued) `r` was added to `cKDTree.query_ball_point` in SciPy
+1.9. Earlier releases coerce `r` with `float()`, so the call raises
+`TypeError: only size 1 arrays can be converted to Python scalars`.
+
+This is not confined to FMM runs: `_dense_formulation_resources`
+(`twod/solver.py:1714-1718`) calls `near_pairs(..., count_only=True)` for memory
+planning on **every** 2-D solve, so a plain Galerkin `run_hpc_monostatic` run
+fails there before any assembly happens. It is the only array-radius query in
+the package; every other `query_ball_point` call passes one point and a scalar.
+
+Fixed by `_query_balls()`, which tries the vectorized call once, caches whether
+it worked, and otherwise issues one query per distinct radius. Verified to
+return identical pair lists with the fallback forced, and an end-to-end
+Galerkin and Pulse solve completes against a KD-tree subclass that rejects
+array radii the way SciPy 1.0 does.
+
+### F11 — `quad_vec` needs SciPy 1.4 and was not needed at all (High)
+
+`twod/pulse/coefficients.py` imported `scipy.integrate.quad_vec` at module
+scope, so on SciPy older than 1.4 every Pulse run died with
+`ImportError: cannot import name 'quad_vec'` before reaching the solver. The
+only use was `_self_integral`, whose integrand is a **scalar** complex value —
+`quad_vec` bought nothing over `quad`.
+
+Fixed by integrating the real and imaginary parts with `scipy.integrate.quad`
+(available in every SciPy), keeping the same tolerances. QUADPACK's
+epsilon-extrapolation handles the endpoint logarithm at t=0 as well as
+`quad_vec`'s adaptive rule did: across k = 1e-3 … 200 (real and complex) and
+panel lengths 1e-4 … 3 m the worst relative difference from the old result is
+**6.3e-15**, with warnings promoted to errors so an `IntegrationWarning` would
+have failed the check.
+
+Note on the wider context: both F10 and F11 were reported from an environment
+running SciPy 1.0.0. The documented headless floor is **SciPy >= 1.14, NumPy >=
+2.0** (`requirements/hpc.txt`, `HPC.md` §"Python environment"), and
+`ghost_backend/hpc/check_environment.py` already fails loudly below it. These
+two fixes remove two avoidable hard dependencies on newer APIs; they do not
+make the package supported on SciPy 1.0. `compressed/factor.py:80` shows the
+next one — `gmres`/`lgmres` take `rtol=` only from SciPy 1.12, and that module
+already detects it with `inspect.signature`, while `twod/fmm/factor.py` passes
+`rtol=` unconditionally.
 
 ---
 
@@ -403,8 +480,10 @@ python reson.py     # F3 table          (interior resonances, 4 backends)
 python reson2.py    # F3 gate behaviour (certified vs uncertified)
 python scan.py      # F3 frequency scan
 python oddorder.py  # F1
-python checks.py    # F8-adjacent: log_moments verification
+python checks.py    # log_moments verification
 python checks2.py   # self-block series and Maue identity verification
+python verify_fixes.py  # F10/F11 fixes: fallback equivalence and quad accuracy
+python legacy_sim.py    # F10/F11 end to end under simulated SciPy 1.0 behaviour
 ```
 
 `common.py` holds the shared harness (it reuses the repo's own

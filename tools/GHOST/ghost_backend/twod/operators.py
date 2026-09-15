@@ -808,18 +808,17 @@ def _sk_blocks_near_linear(
     compute_single_layer: 'bool' = True,
     compute_double_layer: 'bool' = True,
 ) -> 'Tuple[np.ndarray, np.ndarray]':
-    if len(obs_elem.node_ids) > 2 or len(src_elem.node_ids) > 2:
-        from ghost_backend.twod.polynomial_quadrature import near_block
-        sb, kb = near_block(obs_elem, src_elem, k0, obs_normal_deriv)
-        return (sb if compute_single_layer else np.zeros_like(sb),
-                kb if compute_double_layer else np.zeros_like(kb))
     """
     Compute S and K 2x2 blocks for a near element pair.
 
     Uses Duffy transforms for self and touching pairs (via the existing recursive
     path), and the vectorized tensor-Gauss path for separated-near pairs.
     """
-
+    if len(obs_elem.node_ids) > 2 or len(src_elem.node_ids) > 2:
+        from ghost_backend.twod.polynomial_quadrature import near_block
+        sb, kb = near_block(obs_elem, src_elem, k0, obs_normal_deriv)
+        return (sb if compute_single_layer else np.zeros_like(sb),
+                kb if compute_double_layer else np.zeros_like(kb))
     same_elem = obs_elem.panel_index == src_elem.panel_index
 
 
@@ -2291,9 +2290,6 @@ def _linear_element_incident_dn_load_many(
     elevations_deg: 'np.ndarray',
     order: 'int' = 8,
 ) -> 'np.ndarray':
-    if len(elem.node_ids) > 2:
-        from ghost_backend.twod.assembly.kernels import incident_dn
-        return incident_dn(elem, k_air, elevations_deg, order)
     """
     Galerkin-tested normal derivative of the incident plane wave on one element.
 
@@ -2301,6 +2297,9 @@ def _linear_element_incident_dn_load_many(
 
     Used by TE sheet and impedance/flux right-hand sides.
     """
+    if len(elem.node_ids) > 2:
+        from ghost_backend.twod.assembly.kernels import incident_dn
+        return incident_dn(elem, k_air, elevations_deg, order)
     if current_state() is not None:
         from ghost_backend.twod.assembly.kernels import incident_dn
         return incident_dn(elem, k_air, elevations_deg, order)
@@ -2332,9 +2331,6 @@ def _farfield_linear_density_many(
     element_mask: 'Optional[np.ndarray]' = None,
     projection: 'str' = "matched",
 ) -> 'np.ndarray':
-    if mesh_degree(mesh) > 1:
-        from ghost_backend.twod.assembly.kernels import farfield
-        return farfield(mesh, density, k_air, observation_angles_deg, potential, order, element_mask, projection)
     """Vectorized SLP/DLP far field for matched or rectangular projections.
 
     ``density`` may contain one column (one incidence projected at every
@@ -2344,6 +2340,9 @@ def _farfield_linear_density_many(
     ``(density_columns, observation_angles)``. Element tiling bounds the
     temporary phase matrix in either mode.
     """
+    if mesh_degree(mesh) > 1:
+        from ghost_backend.twod.assembly.kernels import farfield
+        return farfield(mesh, density, k_air, observation_angles_deg, potential, order, element_mask, projection)
     if current_state() is not None:
         from ghost_backend.twod.assembly.kernels import farfield
         return farfield(mesh, density, k_air, observation_angles_deg, potential, order, element_mask, projection)

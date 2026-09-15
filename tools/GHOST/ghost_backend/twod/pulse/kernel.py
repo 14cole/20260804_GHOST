@@ -22,6 +22,11 @@ class PulseKernel:
         self.eps=option('fmm_tolerance',1e-10);self.threads=effective_assembly_threads()
         self.order,self.quadrature_policy=quadrature_order(k,self.geometry.lengths.max(),
             option('fmm_quadrature_order',0),8,self.eps)
+        # An odd Gauss rule has a node at t=1/2, which is exactly the panel
+        # centre this point set also carries as a testing target. The native
+        # kernel and the near correction then disagree about that coincident
+        # pair and the product is silently wrong. Round up; never down.
+        self.order+=self.order%2
         self.graded=bool(option('far_grading',True) and not option('fmm_quadrature_order',0) and self.eps>=1e-10)
         self.checkpoint=checkpoint or (lambda:None);self.budget=budget
         self.needed=set();self.near={};self.correction={};self.pairs=[]

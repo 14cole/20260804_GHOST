@@ -12,6 +12,30 @@ from ghost_backend.twod.fmm.kernel import evaluate, NativePlan
 from ghost_backend.twod.basis import values, derivative_matrix
 
 
+_VECTOR_RADIUS = [True]
+
+
+def _query_balls(tree, points, radii):
+    """``query_ball_point`` with one radius per point, on any SciPy release.
+
+    Array-valued ``r`` needs SciPy 1.9; older releases coerce ``r`` with
+    ``float()`` and raise TypeError. Group the points by radius instead so each
+    query keeps a scalar. Supported runtimes (SciPy >= 1.14, see HPC.md) take
+    the vectorized path and pay nothing for the fallback.
+    """
+    if _VECTOR_RADIUS[0]:
+        try:
+            return tree.query_ball_point(points, radii)
+        except TypeError:
+            _VECTOR_RADIUS[0] = False
+    found = [None]*len(points)
+    for radius in np.unique(radii):
+        index = np.flatnonzero(radii == radius)
+        for position, value in zip(index, tree.query_ball_point(points[index], float(radius))):
+            found[position] = value
+    return found
+
+
 def near_pairs(geometry, budget, count_only=False):
     """Enumerate geometric neighbours using length-binned spatial trees."""
     lengths, centers = geometry.lengths, geometry.centers
@@ -24,7 +48,7 @@ def near_pairs(geometry, budget, count_only=False):
         upper = lengths[ids].max()
         for start in range(0,len(lengths),256):
             stop = min(start+256,len(lengths))
-            candidates = tree.query_ball_point(centers[start:stop],3*np.maximum(lengths[start:stop],upper))
+            candidates = _query_balls(tree,centers[start:stop],3*np.maximum(lengths[start:stop],upper))
             for i, js in enumerate(candidates,start):
                 js = ids[np.asarray(js,int)]
                 js = js[js>=i]

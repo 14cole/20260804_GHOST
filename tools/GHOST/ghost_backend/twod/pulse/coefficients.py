@@ -8,7 +8,7 @@ on a straight self panel. No Galerkin testing or nodal mass matrix is used.
 from functools import lru_cache
 import numpy as np
 from scipy.special import hankel2,j0,y0,j1,y1
-from scipy.integrate import quad_vec
+from scipy.integrate import quad
 
 
 @lru_cache(64)
@@ -32,9 +32,13 @@ def green(k,r,derivative,potential=True):
 @lru_cache(8192)
 def _self_integral(k,length):
     # A dimensionless interval keeps absolute accuracy consistent with length.
-    value,error=quad_vec(lambda t:green(k,np.array([length*t]),False)[0][0],
-                         0.,.5,epsabs=2e-13,epsrel=2e-12)
-    return 2*length*value
+    # The integrand is scalar, so its real and imaginary parts go through quad
+    # separately instead of quad_vec, which needs SciPy 1.4. QUADPACK's
+    # extrapolation handles the endpoint logarithm at t=0.
+    def component(part):
+        return quad(lambda t:part(green(k,np.array([length*t]),False)[0][0]),
+                    0.,.5,epsabs=2e-13,epsrel=2e-12,limit=200)[0]
+    return 2*length*complex(component(lambda z:z.real),component(lambda z:z.imag))
 
 
 def self_single_layer(k,length):
@@ -142,15 +146,17 @@ def blocks(g,k,rows,cols,kinds,order,graded=False):
         if graded:
             # Guard both kernel variation across the source panel and phase.
             # Normal-derivative kernels impose the stricter distance limits.
-            # Keep the full rule around near corrections and at high |k|h.
+            # Near pairs skip this rule entirely; the full rule also stays at
+            # high |k|h.
             ratio=distance/g.lengths[c];electrical=abs(k)*g.lengths[c]
             orders[(ratio>=6)&(electrical<=.6)]=min(order,4)
             orders[(ratio>=16)&(electrical<=.15)]=min(order,3)
             orders[(ratio>=200)&(electrical<=.01)]=min(order,2)
-            orders[near]=order
         chunk={kind:np.empty(len(r),complex) for kind in kinds}
-        for q in np.unique(orders):
-            take=orders==q
+        # Near entries are replaced by the checked integrals below, so the
+        # point rule skips them instead of computing values it will overwrite.
+        for q in np.unique(orders[~near]):
+            take=(orders==q)&~near
             part=point_pairs(g,k,r[take],c[take],kinds,int(q))
             for kind in kinds:chunk[kind][take]=part[kind]
         if np.any(near):

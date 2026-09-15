@@ -16,8 +16,12 @@ def operators(curve, count, k, memory_gib=None):
         raise ValueError('Nystr\xf6m needs an even node count of at least eight.')
     if not np.isfinite(k) or k<=0:raise ValueError('The exterior wavenumber must be positive and real.')
     if memory_gib is None:
-        import psutil
-        memory_gib=min(8.,.5*psutil.virtual_memory().available/1024**3)
+        # psutil is optional at runtime, so share the solver's guarded probe
+        # instead of importing it directly. Keep the 8 GiB cap when no probe
+        # reports anything rather than failing the budget check below.
+        from ghost_backend.twod.solver import _detect_available_gb
+        detected=_detect_available_gb()
+        memory_gib=min(8.,.5*detected) if detected>0 else 8.
     if not np.isfinite(memory_gib) or memory_gib<=0:raise ValueError('Nystr\xf6m memory budget must be positive GiB.')
     if 384*count**2>memory_gib*1024**3:
         raise MemoryError('Dense Nystr\xf6m workspace estimate exceeds the requested memory budget.')

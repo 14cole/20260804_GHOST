@@ -46,7 +46,9 @@ available in this integrated version.
 - Automatic FMM quadrature uses six points for electrically short linear/Pulse
   panels in the qualified tolerance range. It retains eight or more outside
   that range and for polynomial Galerkin bases. `fmm_quadrature_order=8` requests
-  the former minimum. Electrical panel length can require a larger rule.
+  the former minimum. Electrical panel length can require a larger rule. Pulse
+  rounds its effective order up to even, because an odd Gauss rule has a node on
+  the panel centre that its point set also uses as a testing target.
 - Point-space work is bounded to eight native densities. Numeric near buffers,
   shared Galerkin sparse transposes and omitted unused channels reduce temporary
   storage. Memory admission uses geometric near counts, with separate native,
