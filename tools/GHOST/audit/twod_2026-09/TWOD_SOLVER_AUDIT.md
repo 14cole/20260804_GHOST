@@ -6,7 +6,7 @@ factorization backends), plus the compressed/FMM oracles that share those
 operators.
 
 Status: the audit itself was read-only; a follow-up commit on this branch then
-fixed F1, F6, F8, F9, F10 and F11 (see §1.1). F2, F3 and F4 are left open
+fixed F1, F6, F8, F9, F10, F11 and F12 (see §1.1). F2, F3 and F4 are left open
 because each is a design decision, not a defect to patch.
 
 Environment used for the measurements: Linux, CPython 3.11.15, NumPy 2.4.6,
@@ -20,6 +20,10 @@ A wider 2-D sweep — `test_2d_capability_acceptance`, `test_rcs_physics_regress
 `test_assembly_equivalence`, `test_near_separation`, `test_nystrom`,
 `test_2d_co_polarized` — gave 92 passed / 2 failed / 28 subtests, and both
 failures are F9 below (a missing *optional* dependency), not solver defects.
+After the F1/F6/F8/F9/F10/F11 fixes the same sweep plus `test_pulse`, `test_fmm`
+and `test_fmm_efficiency` gave **170 passed / 1 skipped / 48 subtests** (the skip
+is the PySide6 GUI case), and the fixed-polygon convergence tables in §2 F2
+re-ran byte-identical.
 
 ---
 
@@ -38,6 +42,7 @@ failures are F9 below (a missing *optional* dependency), not solver defects.
 | F9 | Low | Packaging | `twod/nystrom.py` imports `psutil` unguarded although the requirements declare it optional at runtime |
 | F10 | High | Galerkin + Pulse planning | `fmm/galerkin.near_pairs` passes an array radius to `cKDTree.query_ball_point`, which needs SciPy 1.9; older SciPy raises `TypeError: only size 1 arrays can be converted to Python scalars` |
 | F11 | High | Pulse | `pulse/coefficients` imports `scipy.integrate.quad_vec`, which needs SciPy 1.4, for a scalar integrand |
+| F12 | Medium | FMM backend | `twod/fmm/factor.py` uses four keywords newer than the rest of the package tolerates: `LinearOperator(rmatmat=)` (SciPy 1.4), `gmres`/`lgmres` `rtol=` (1.12), `atol=`/`callback_type=` (1.1) and `np.argsort(kind='stable')` (NumPy 1.15) |
 
 Verified-correct items are listed in §3; they matter because they bound where
 the problems can be.
@@ -52,6 +57,7 @@ the problems can be.
 | F9 | `nystrom.operators` uses the solver's guarded `_detect_available_gb()` instead of importing psutil directly, and keeps the previous 8 GiB cap when no probe reports anything. |
 | F10 | `_query_balls()` falls back to one scalar-radius query per distinct radius when SciPy rejects an array `r`, detected once and cached. |
 | F11 | `_self_integral` integrates the real and imaginary parts with `scipy.integrate.quad`; verified to 6.3e-15 against `quad_vec` for k from 1e-3 to 200 and panel lengths from 1e-4 to 3 m. |
+| F12 | `_krylov_kwargs()` builds the tolerance/callback keywords from the solver's own signature (the idiom `compressed/factor.py:80` already used), `_equation_operator()` drops `rmatmat` when SciPy will not take it, and the stable sort asks for `'mergesort'`. |
 
 F2 (Pulse convergence rate), F3 (TE interior resonances) and F4 (backend-dependent
 TM PEC formulation) are **not** fixed here: each needs a decision about what the
@@ -384,15 +390,55 @@ panel lengths 1e-4 … 3 m the worst relative difference from the old result is
 **6.3e-15**, with warnings promoted to errors so an `IntegrationWarning` would
 have failed the check.
 
-Note on the wider context: both F10 and F11 were reported from an environment
+Note on the wider context: F10, F11 and F12 were reported from an environment
 running SciPy 1.0.0. The documented headless floor is **SciPy >= 1.14, NumPy >=
 2.0** (`requirements/hpc.txt`, `HPC.md` §"Python environment"), and
 `ghost_backend/hpc/check_environment.py` already fails loudly below it. These
-two fixes remove two avoidable hard dependencies on newer APIs; they do not
-make the package supported on SciPy 1.0. `compressed/factor.py:80` shows the
-next one — `gmres`/`lgmres` take `rtol=` only from SciPy 1.12, and that module
-already detects it with `inspect.signature`, while `twod/fmm/factor.py` passes
-`rtol=` unconditionally.
+fixes remove the avoidable hard dependencies on newer APIs that a scan of
+`twod/`, `linalg/`, `compressed/` and `execution/` turned up; they are not a
+claim that the package is supported on SciPy 1.0, which was not available to
+test against directly. What was tested is that both discretizations run to the
+same answers on dense, compressed and FMM with every one of those APIs made
+unavailable — see `legacy_sim.py`, which asserts that each fallback was
+actually taken rather than merely present.
+
+### F12 — the FMM backend uses four keywords newer than the rest of the package (Medium)
+
+`twod/fmm/factor.py` was the one module left demanding APIs newer than F10/F11
+did:
+
+| call | keyword | needs |
+|---|---|---|
+| `LinearOperator((n,n), …, rmatmat=rmm)` | `rmatmat` | SciPy 1.4 |
+| `gmres(…, rtol=…)`, `lgmres(…, rtol=…)` | `rtol` (was `tol`) | SciPy 1.12 |
+| `gmres(…, atol=0., callback_type='legacy')` | `atol`, `callback_type` | SciPy 1.1 |
+| `lgmres(…, prepend_outer_v=True)` | `prepend_outer_v` | not in the oldest releases |
+| `np.argsort(…, kind='stable')` | `'stable'` | NumPy 1.15 |
+
+`compressed/factor.py:80` already solved the same problem with
+`inspect.signature`, so the FMM backend was simply inconsistent with its
+sibling.
+
+**Fixed on this branch.** `_krylov_kwargs()` builds the keyword set from the
+solver's own signature; `_equation_operator()` tries `rmatmat` once and falls
+back without it; the sort asks for `'mergesort'`, which every NumPy accepts,
+gives the same stable ordering, and is already what the sibling clustering
+routine in `linalg/hierarchical.py:33` uses.
+
+`ghost_backend/tests/test_scipy_compatibility.py` (added to the
+`scripts/check_headless.py` qualification list) guards all of this: it feeds
+`_krylov_kwargs` stand-ins carrying the exact SciPy 1.0 signatures, refuses
+`rmatmat` and checks the adjoint still matches, runs `near_pairs` against a
+scalar-only `query_ball_point` and asserts the fallback was actually taken, and
+imports `pulse/coefficients` with `quad_vec` removed.
+
+None of this changes behaviour on a supported runtime. The legacy `tol` is
+measured against `norm(b)`, which is exactly what `rtol` with `atol=0` means;
+`callback_type='legacy'` is the old default, so omitting it matches; a missing
+`rmatmat` costs one `rmatvec` per column instead of a batched adjoint, and a
+missing `prepend_outer_v` only reorders augmentation vectors — and every
+reconstructed solution is still checked against the original, unscaled
+equation.
 
 ---
 
@@ -483,7 +529,8 @@ python oddorder.py  # F1
 python checks.py    # log_moments verification
 python checks2.py   # self-block series and Maue identity verification
 python verify_fixes.py  # F10/F11 fixes: fallback equivalence and quad accuracy
-python legacy_sim.py    # F10/F11 end to end under simulated SciPy 1.0 behaviour
+python legacy_sim.py    # F10/F11/F12: both discretizations on dense, compressed
+                        # and FMM with every post-SciPy-1.0 API removed
 ```
 
 `common.py` holds the shared harness (it reuses the repo's own

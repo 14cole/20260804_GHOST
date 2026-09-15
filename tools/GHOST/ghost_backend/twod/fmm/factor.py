@@ -1,10 +1,49 @@
 """Equilibrated sparse-preconditioned GMRES with explicit residual rejection."""
+import inspect
 import numpy as np
 from scipy.sparse import diags
 from scipy.sparse.linalg import LinearOperator, spilu, gmres, lgmres, onenormest
 from ghost_backend.execution.options import option
 from ghost_backend.execution.metrics import timed_stage
 from ghost_backend.execution.errors import BackendNumericalError
+
+_SIGNATURES = {}
+
+
+def _krylov_kwargs(function, rtol, **optional):
+    """Tolerance and optional keywords this SciPy's Krylov solver accepts.
+
+    ``rtol`` replaced ``tol`` in SciPy 1.12, while ``atol``, ``callback_type``
+    and ``prepend_outer_v`` arrived later than the oldest releases the drivers
+    still meet. The legacy ``tol`` is measured against ``norm(b)``, which is
+    what ``rtol`` with ``atol=0`` means, so the convergence test is unchanged;
+    a missing ``prepend_outer_v`` only reorders the augmentation vectors, and
+    every solution is still checked against the original equation.
+    """
+    parameters = _SIGNATURES.get(function)
+    if parameters is None:
+        parameters = _SIGNATURES[function] = inspect.signature(function).parameters
+    kwargs = {'rtol' if 'rtol' in parameters else 'tol': rtol}
+    if 'atol' in parameters:
+        kwargs['atol'] = 0.
+    for name, value in optional.items():
+        if name in parameters:
+            kwargs[name] = value
+    return kwargs
+
+
+def _equation_operator(shape, matvec, rmatvec, matmat, rmatmat):
+    """LinearOperator carrying an explicit adjoint matmat where SciPy takes one.
+
+    ``rmatmat`` is a SciPy 1.4 keyword. Without it the adjoint falls back to
+    one ``rmatvec`` per column, which is the same product at a lower batch
+    rate, so the operator is built without it rather than failing.
+    """
+    kwargs = dict(matvec=matvec, rmatvec=rmatvec, matmat=matmat, dtype=complex)
+    try:
+        return LinearOperator(shape, rmatmat=rmatmat, **kwargs)
+    except TypeError:
+        return LinearOperator(shape, **kwargs)
 
 
 class FMMConvergenceError(BackendNumericalError):
@@ -48,7 +87,7 @@ class FMMFactor:
         def rmv(x):return col*(matrix.H@(row*x))
         def mm(x):return row[:,None]*(matrix@(col[:,None]*x))
         def rmm(x):return col[:,None]*(matrix.H@(row[:,None]*x))
-        self.eq=LinearOperator((n,n),matvec=mv,rmatvec=rmv,matmat=mm,rmatmat=rmm,dtype=complex)
+        self.eq=_equation_operator((n,n),mv,rmv,mm,rmm)
         self.pre=LinearOperator((n,n),matvec=self.lu.solve,dtype=complex)
         self.preh=LinearOperator((n,n),matvec=lambda b:lu.solve(b,trans='H'),dtype=complex)
         self.details=matrix.report()
@@ -90,7 +129,8 @@ class FMMFactor:
             ids=groups.pop(index)
             if len(ids)<4:return False
             axis=int(np.argmax(np.ptp(coordinates[ids],axis=0)))
-            ids=ids[np.argsort(coordinates[ids,axis],kind='stable')]
+            # 'mergesort' is the stable kind every NumPy release accepts.
+            ids=ids[np.argsort(coordinates[ids,axis],kind='mergesort')]
             groups.extend((ids[:len(ids)//2],ids[len(ids)//2:]))
         z=np.zeros((n,len(groups)),complex)
         for j,ids in enumerate(groups):z[ids,j]=1/np.sqrt(len(ids))
@@ -163,14 +203,15 @@ class FMMFactor:
                 if residual > self.tolerance*.2 and stalled[0]>=2 and augmentation:
                     augmentation.clear();stalled[0]=0
                     self.details['recycle_resets']+=1
-            x,info=lgmres(counted,b,M=self.preh if adjoint else self.pre,
-                rtol=self.tolerance*.2,atol=0.,maxiter=self.maxiter,
+            x,info=lgmres(counted,b,M=self.preh if adjoint else self.pre,maxiter=self.maxiter,
                 inner_m=min(self.restart,len(b)),outer_k=min(self.recycle_limit,len(b)),
-                outer_v=augmentation,store_outer_Av=True,prepend_outer_v=True,callback=check_progress)
+                outer_v=augmentation,store_outer_Av=True,callback=check_progress,
+                **_krylov_kwargs(lgmres,self.tolerance*.2,prepend_outer_v=True))
         else:
-            x,info=gmres(counted,b,M=self.preh if adjoint else self.pre,rtol=self.tolerance*.2,
-                atol=0.,restart=min(self.restart,len(b)),maxiter=self.maxiter,
-                callback=lambda _: self.checkpoint(),callback_type='legacy')
+            x,info=gmres(counted,b,M=self.preh if adjoint else self.pre,
+                restart=min(self.restart,len(b)),maxiter=self.maxiter,
+                callback=lambda _: self.checkpoint(),
+                **_krylov_kwargs(gmres,self.tolerance*.2,callback_type='legacy'))
         residual=np.linalg.norm(a@x-b)/np.linalg.norm(b)
         if info or not np.isfinite(residual) or residual>self.tolerance:
             raise FMMConvergenceError('FMM GMRES failed: info={}, operator applications={}, residual={:.3g}; limit={:.3g}.'.format(info,count[0],residual,self.tolerance))
