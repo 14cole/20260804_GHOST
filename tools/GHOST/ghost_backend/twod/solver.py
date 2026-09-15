@@ -1341,7 +1341,14 @@ def _estimate_memory_gb(
 
 def _solve_te_robin_mfie(mesh, infos, pol, k0, elevations_deg, obs_order=8, src_order=8,
                          solver_method="auto", condition_diagnostics=None, operator_cache=None):
-    """Generalized TE MFIE with one factorization and bounded angle batches."""
+    """Guarded private alias for the TE limit of the Robin single-layer route.
+
+    The monostatic dispatch calls ``_solve_robin_bie`` for both polarizations --
+    TE is the MFIE limit of the same equation, so there is one code path. This
+    wrapper only survives for the retired-``solver_method`` contract that
+    ``test_direct_solver_methods`` pins on the private formulations; delete both
+    together if that contract is not wanted.
+    """
     _normalize_public_2d_solver_method(solver_method)
     return _solve_robin_bie(mesh, infos, pol, k0, elevations_deg, obs_order, src_order,
                             condition_diagnostics, operator_cache)
@@ -1876,8 +1883,37 @@ def solve_monostatic_rcs_2d_single_polarization(
     panel_length_max_values: 'List[float]' = []
     elevations_arr = np.asarray(elevations, dtype=float)
     reused_matrix_solve_count = 0
+
+    def record_samples(rcs_lin_vec, rcs_db_vec, amp_vec, residual_vec, tag):
+        """Append one frequency's angle samples. Shared by every formulation.
+
+        Each branch differs only in which solver produced the vectors and what
+        the progress line calls it, so the record shape lives here once.
+        """
+        nonlocal done_steps
+        for idx, elev_deg in enumerate(elevations):
+            amp_val = complex(amp_vec[idx])
+            residual_local = float(residual_vec[idx])
+            samples.append(
+                {
+                    "frequency_ghz": float(freq_ghz),
+                    "theta_inc_deg": float(elev_deg),
+                    "theta_scat_deg": float(elev_deg),
+                    "rcs_linear": float(rcs_lin_vec[idx]),
+                    "rcs_db": float(rcs_db_vec[idx]),
+                    "rcs_amp_real": float(np.real(amp_val)),
+                    "rcs_amp_imag": float(np.imag(amp_val)),
+                    "rcs_amp_phase_deg": float(math.degrees(cmath.phase(amp_val))),
+                    "linear_residual": residual_local,
+                }
+            )
+            residual_values.append(residual_local)
+            constraint_residual_values.append(0.0)
+            done_steps += 1
+            emit_progress(f"{tag} solved {freq_ghz:g} GHz at {elev_deg:g} deg")
+
     max_parallel_workers_used = 1
-    formulation_label = "2D BIE/MoM coupled dielectric trace formulation (linear Galerkin)"
+    formulation_label = ""  # every branch sets one; the fallthrough raises
     thin_layer_evidence = []
     junction_treatment = "none"
     junction_constraints_applied = False
@@ -2145,15 +2181,8 @@ def solve_monostatic_rcs_2d_single_polarization(
             rcs_db_vec=_rcs_db_from_sigma(rcs_lin_vec)
             _consume_condition_estimate(cond_values,condition_diagnostics,formulation_label)
             reused_matrix_solve_count+=len(elevations)
-            for idx,elev_deg in enumerate(elevations):
-                amp_val=complex(amp_vec[idx])
-                samples.append(dict(frequency_ghz=float(freq_ghz),theta_inc_deg=float(elev_deg),
-                    theta_scat_deg=float(elev_deg),rcs_linear=float(rcs_lin_vec[idx]),
-                    rcs_db=float(rcs_db_vec[idx]),rcs_amp_real=float(amp_val.real),
-                    rcs_amp_imag=float(amp_val.imag),rcs_amp_phase_deg=float(math.degrees(cmath.phase(amp_val))),
-                    linear_residual=float(pulse_residual)))
-                residual_values.append(float(pulse_residual));constraint_residual_values.append(0.)
-                done_steps+=1;emit_progress(f'Pulse solved {freq_ghz:g} GHz at {elev_deg:g} deg')
+            record_samples(rcs_lin_vec, rcs_db_vec, amp_vec,
+                           np.full(len(elevations), float(pulse_residual)), "Pulse")
             continue
 
         if _is_all_sheet(coupled_infos):
@@ -2184,24 +2213,7 @@ def solve_monostatic_rcs_2d_single_polarization(
             )
             reused_matrix_solve_count += len(elevations)
 
-            for idx, elev_deg in enumerate(elevations):
-                amp_val = complex(amp_vec[idx])
-                residual_local = float(residual_vec[idx])
-                samples.append({
-                    "frequency_ghz": float(freq_ghz),
-                    "theta_inc_deg": float(elev_deg),
-                    "theta_scat_deg": float(elev_deg),
-                    "rcs_linear": float(rcs_lin_vec[idx]),
-                    "rcs_db": float(rcs_db_vec[idx]),
-                    "rcs_amp_real": float(np.real(amp_val)),
-                    "rcs_amp_imag": float(np.imag(amp_val)),
-                    "rcs_amp_phase_deg": float(math.degrees(cmath.phase(amp_val))),
-                    "linear_residual": residual_local,
-                })
-                residual_values.append(residual_local)
-                constraint_residual_values.append(0.0)
-                done_steps += 1
-                emit_progress(f"Sheet BIE solved {freq_ghz:g} GHz at {elev_deg:g} deg")
+            record_samples(rcs_lin_vec, rcs_db_vec, amp_vec, residual_vec, "Sheet BIE")
             continue
 
 
@@ -2225,24 +2237,7 @@ def solve_monostatic_rcs_2d_single_polarization(
             )
             reused_matrix_solve_count += len(elevations)
 
-            for idx, elev_deg in enumerate(elevations):
-                amp_val = complex(amp_vec[idx])
-                residual_local = float(residual_vec[idx])
-                samples.append({
-                    "frequency_ghz": float(freq_ghz),
-                    "theta_inc_deg": float(elev_deg),
-                    "theta_scat_deg": float(elev_deg),
-                    "rcs_linear": float(rcs_lin_vec[idx]),
-                    "rcs_db": float(rcs_db_vec[idx]),
-                    "rcs_amp_real": float(np.real(amp_val)),
-                    "rcs_amp_imag": float(np.imag(amp_val)),
-                    "rcs_amp_phase_deg": float(math.degrees(cmath.phase(amp_val))),
-                    "linear_residual": residual_local,
-                })
-                residual_values.append(residual_local)
-                constraint_residual_values.append(0.0)
-                done_steps += 1
-                emit_progress(f"Mixed sheet+PEC BIE solved {freq_ghz:g} GHz at {elev_deg:g} deg")
+            record_samples(rcs_lin_vec, rcs_db_vec, amp_vec, residual_vec, "Mixed sheet+PEC BIE")
             continue
 
         if cached_panels is None:
@@ -2295,51 +2290,6 @@ def solve_monostatic_rcs_2d_single_polarization(
         check_abort()
 
 
-        use_te_robin_mfie = (pol == 'TE' and _is_all_robin(coupled_infos))
-
-        if use_te_robin_mfie:
-            formulation_label = "2D MFIE TE Robin (SLP representation)"
-            condition_diagnostics = {} if compute_condition_number else None
-            rcs_lin_vec, amp_vec, mfie_residual = _solve_te_robin_mfie(
-                mesh=mesh,
-                infos=coupled_infos,
-                pol=pol,
-                k0=k0,
-                elevations_deg=elevations_arr,
-                solver_method=solver_method,
-                condition_diagnostics=condition_diagnostics,
-                operator_cache=shared_operator_cache,
-            )
-            rcs_db_vec = _rcs_db_from_sigma(rcs_lin_vec)
-            residual_vec = np.full(len(elevations), mfie_residual, dtype=float)
-            constraint_residual_vec = np.zeros(len(elevations), dtype=float)
-            _consume_condition_estimate(
-                cond_values, condition_diagnostics, formulation_label
-            )
-            reused_matrix_solve_count += len(elevations)
-
-            for idx, elev_deg in enumerate(elevations):
-                amp_val = complex(amp_vec[idx])
-                residual_local = float(residual_vec[idx])
-                samples.append(
-                    {
-                        "frequency_ghz": float(freq_ghz),
-                        "theta_inc_deg": float(elev_deg),
-                        "theta_scat_deg": float(elev_deg),
-                        "rcs_linear": float(rcs_lin_vec[idx]),
-                        "rcs_db": float(rcs_db_vec[idx]),
-                        "rcs_amp_real": float(np.real(amp_val)),
-                        "rcs_amp_imag": float(np.imag(amp_val)),
-                        "rcs_amp_phase_deg": float(math.degrees(cmath.phase(amp_val))),
-                        "linear_residual": residual_local,
-                    }
-                )
-                residual_values.append(residual_local)
-                constraint_residual_values.append(0.0)
-                done_steps += 1
-                emit_progress(f"MFIE solved {freq_ghz:g} GHz at {elev_deg:g} deg")
-            continue
-
 
         use_multi_region = _is_multi_region(coupled_infos)
 
@@ -2364,26 +2314,7 @@ def solve_monostatic_rcs_2d_single_polarization(
             )
             reused_matrix_solve_count += len(elevations)
 
-            for idx, elev_deg in enumerate(elevations):
-                amp_val = complex(amp_vec[idx])
-                residual_local = float(residual_vec[idx])
-                samples.append(
-                    {
-                        "frequency_ghz": float(freq_ghz),
-                        "theta_inc_deg": float(elev_deg),
-                        "theta_scat_deg": float(elev_deg),
-                        "rcs_linear": float(rcs_lin_vec[idx]),
-                        "rcs_db": float(rcs_db_vec[idx]),
-                        "rcs_amp_real": float(np.real(amp_val)),
-                        "rcs_amp_imag": float(np.imag(amp_val)),
-                        "rcs_amp_phase_deg": float(math.degrees(cmath.phase(amp_val))),
-                        "linear_residual": residual_local,
-                    }
-                )
-                residual_values.append(residual_local)
-                constraint_residual_values.append(0.0)
-                done_steps += 1
-                emit_progress(f"Multi-region solved {freq_ghz:g} GHz at {elev_deg:g} deg")
+            record_samples(rcs_lin_vec, rcs_db_vec, amp_vec, residual_vec, "Multi-region")
             continue
 
 
@@ -2408,36 +2339,19 @@ def solve_monostatic_rcs_2d_single_polarization(
             )
             reused_matrix_solve_count += len(elevations)
 
-            for idx, elev_deg in enumerate(elevations):
-                amp_val = complex(amp_vec[idx])
-                residual_local = float(residual_vec[idx])
-                samples.append(
-                    {
-                        "frequency_ghz": float(freq_ghz),
-                        "theta_inc_deg": float(elev_deg),
-                        "theta_scat_deg": float(elev_deg),
-                        "rcs_linear": float(rcs_lin_vec[idx]),
-                        "rcs_db": float(rcs_db_vec[idx]),
-                        "rcs_amp_real": float(np.real(amp_val)),
-                        "rcs_amp_imag": float(np.imag(amp_val)),
-                        "rcs_amp_phase_deg": float(math.degrees(cmath.phase(amp_val))),
-                        "linear_residual": residual_local,
-                    }
-                )
-                residual_values.append(residual_local)
-                constraint_residual_values.append(0.0)
-                done_steps += 1
-                emit_progress(f"Dielectric solved {freq_ghz:g} GHz at {elev_deg:g} deg")
+            record_samples(rcs_lin_vec, rcs_db_vec, amp_vec, residual_vec, "Dielectric")
             continue
 
 
         use_robin_bie = _is_all_robin(coupled_infos)
 
         if use_robin_bie:
+            # One Robin route for both polarizations: TM is the EFIE/IBC
+            # override, TE the MFIE limit of the same single-layer equation.
             formulation_label = (
                 "2D Robin-BIE (SLP representation; element-weighted IBC, TM-PEC EFIE override)"
                 if pol == 'TM'
-                else "2D Robin-BIE IBC formulation (SLP representation)"
+                else "2D MFIE TE Robin (SLP representation)"
             )
             condition_diagnostics = {} if compute_condition_number else None
             rcs_lin_vec, amp_vec, robin_residual = _solve_robin_bie(
@@ -2457,26 +2371,8 @@ def solve_monostatic_rcs_2d_single_polarization(
             )
             reused_matrix_solve_count += len(elevations)
 
-            for idx, elev_deg in enumerate(elevations):
-                amp_val = complex(amp_vec[idx])
-                residual_local = float(residual_vec[idx])
-                samples.append(
-                    {
-                        "frequency_ghz": float(freq_ghz),
-                        "theta_inc_deg": float(elev_deg),
-                        "theta_scat_deg": float(elev_deg),
-                        "rcs_linear": float(rcs_lin_vec[idx]),
-                        "rcs_db": float(rcs_db_vec[idx]),
-                        "rcs_amp_real": float(np.real(amp_val)),
-                        "rcs_amp_imag": float(np.imag(amp_val)),
-                        "rcs_amp_phase_deg": float(math.degrees(cmath.phase(amp_val))),
-                        "linear_residual": residual_local,
-                    }
-                )
-                residual_values.append(residual_local)
-                constraint_residual_values.append(0.0)
-                done_steps += 1
-                emit_progress(f"Robin-BIE solved {freq_ghz:g} GHz at {elev_deg:g} deg")
+            record_samples(rcs_lin_vec, rcs_db_vec, amp_vec, residual_vec,
+                           "MFIE" if pol == 'TE' else "Robin-BIE")
             continue
 
 

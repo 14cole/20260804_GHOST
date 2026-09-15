@@ -8,7 +8,7 @@ import threading
 import numpy as np
 from ghost_backend.twod.assembly.compact import CompactOperator, scatter_operator_add
 from ghost_backend.linalg.workspace import first_nonfinite
-from ghost_backend.twod.assembly.separation import requires_adaptive, close_pairs
+from ghost_backend.twod.assembly.separation import requires_adaptive, close_pairs, segment_distance
 
 
 from ghost_backend.twod.geometry import (
@@ -1276,6 +1276,71 @@ def _run_tiled_obs_blocks(
         list(pool.map(run, starts))
 
 
+_NEAR_CLASSIFY_CHUNK = 1 << 19
+
+
+def _near_fixed_order_positions(
+    panel_index: 'np.ndarray',
+    obs_idx: 'np.ndarray',
+    src_idx: 'np.ndarray',
+    p0_arr: 'np.ndarray',
+    p1_arr: 'np.ndarray',
+    centers: 'np.ndarray',
+    lengths: 'np.ndarray',
+    obs_order: 'int',
+    src_order: 'int',
+) -> 'Dict[int, np.ndarray]':
+    """Bucket near pairs by tensor-quadrature order, for every pair at once.
+
+    The per-pair route applies three exclusions -- a self panel, a pair sharing
+    an endpoint, and a pair close enough to need the adaptive rule -- and orders
+    the rest from the centre-distance ratio. Each is a geometric predicate, so
+    all of them evaluate as arrays; doing it a pair at a time was the largest
+    interpreter-locked stretch of the assembly and what kept it from using its
+    threads.
+
+    Positions stay ascending within each bucket, and every block is still
+    integrated independently, so the assembled coefficients are unchanged.
+    Scratch is bounded by processing the pair list in chunks.
+    """
+
+    buckets: 'Dict[int, List[np.ndarray]]' = {}
+    floor = int(max(obs_order, src_order))
+    for start in range(0, obs_idx.size, _NEAR_CLASSIFY_CHUNK):
+        o = obs_idx[start:start + _NEAR_CLASSIFY_CHUNK]
+        s = src_idx[start:start + _NEAR_CLASSIFY_CHUNK]
+        keep = panel_index[o] != panel_index[s]
+        # Shared endpoints, matching the 1e-9 tolerance of the per-pair check.
+        for a in (p0_arr, p1_arr):
+            for b in (p0_arr, p1_arr):
+                keep &= np.linalg.norm(a[o] - b[s], axis=1) > 1.0e-9
+        # requires_adaptive, term for term.
+        scale = np.maximum(lengths[o], lengths[s])
+        distance = np.linalg.norm(centers[o] - centers[s], axis=1)
+        adaptive = distance < 0.75 * scale
+        maybe = np.flatnonzero(
+            ~adaptive & (distance < 0.5 * (lengths[o] + lengths[s]) + 0.25 * scale)
+        )
+        if maybe.size:
+            mo, ms = o[maybe], s[maybe]
+            adaptive[maybe] = segment_distance(
+                p0_arr[mo], p1_arr[mo], p0_arr[ms], p1_arr[ms]
+            ) < 0.25 * scale[maybe]
+        keep &= ~adaptive
+        # _near_singular_scheme's order ladder, then the caller's clamp.
+        ratio = distance / np.maximum(scale, EPS)
+        adapt = np.select(
+            [ratio < 0.25, ratio < 0.60, ratio < 1.50, ratio < 3.00],
+            [64, 56, 40, 28], default=16,
+        )
+        order = np.maximum(floor, np.minimum(16, np.maximum(5, adapt)))
+        for value in np.unique(order[keep]):
+            buckets.setdefault(int(value), []).append(
+                start + np.flatnonzero(keep & (order == value))
+            )
+    return {order: np.concatenate(parts) for order, parts in buckets.items()}
+
+
 def _expand_near_chunks(
     chunks: 'List[Tuple[int, np.ndarray, int, np.ndarray, bool]]',
 ) -> 'Tuple[np.ndarray, np.ndarray]':
@@ -1828,31 +1893,11 @@ def _assemble_linear_operator_matrices_multi(
     obs_idx, src_idx = _expand_near_chunks(near_chunks)
 
 
-    fixed_positions_by_order: 'Dict[int, List[int]]' = {}
-    for pos in range(obs_idx.size):
-        obs_elem_eval = elements[int(obs_idx[pos])]
-        src_elem_eval = elements[int(src_idx[pos])]
-        if obs_elem_eval.panel_index == src_elem_eval.panel_index:
-            continue
-        shared = _linear_shared_interval_endpoint_info(
-            obs_elem_eval,
-            (0.0, 1.0),
-            src_elem_eval,
-            (0.0, 1.0),
-            tol=1.0e-9,
-        )
-        if shared is not None:
-            continue
-        distance = float(np.linalg.norm(obs_elem_eval.center - src_elem_eval.center))
-        scale = max(obs_elem_eval.length, src_elem_eval.length, EPS)
-        if requires_adaptive(obs_elem_eval, src_elem_eval):
-            continue
-        adapt_order, _ = _near_singular_scheme(distance, scale)
-        tensor_order = max(
-            int(max(obs_order, src_order)),
-            min(16, int(max(5, adapt_order))),
-        )
-        fixed_positions_by_order.setdefault(tensor_order, []).append(pos)
+    fixed_positions_by_order = _near_fixed_order_positions(
+        np.asarray([e.panel_index for e in elements], dtype=np.int64),
+        obs_idx, src_idx, p0_arr, p0_arr + seg_arr, centers, lengths,
+        obs_order, src_order,
+    )
 
     fixed_blocks: 'Dict[int, Tuple[np.ndarray, np.ndarray]]' = {}
     for tensor_order, positions in fixed_positions_by_order.items():

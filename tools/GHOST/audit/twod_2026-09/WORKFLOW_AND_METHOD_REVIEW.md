@@ -152,12 +152,17 @@ single highest-value workflow change on this list.
 n=2048 PEC circle, three angles, both polarizations: 14.06 s at one thread,
 8.95 s at four. Profile at one thread (14.06 s total):
 
-| | time | share |
+| | before | after the §4 fix |
 |---|---:|---:|
-| `_far_pass` (cumulative) | 10.22 s | 73 % |
-| — `_far_green_into` + `_far_hankel1_into` + `_axpy_into` | 6.65 s | 47 % |
-| near classification + touching/self pairs | ~3.4 s | 24 % |
-| `lu_factor` | 0.88 s | 6 % |
+| total, one thread | 14.06 s | 13.65 s |
+| total, four threads | 8.95 s | 8.33 s |
+| `_far_pass` (cumulative) | 10.22 s | 10.33 s (76 %) |
+| — `_axpy_into` | 2.23 s | 2.35 s |
+| — `_far_green_into` + `_far_hankel1_into` | 4.40 s | 4.40 s |
+| — `ufunc.at` scatter | 0.99 s | 0.99 s |
+| touching/self pairs | 1.59 s | 1.56 s |
+| near classification (Python loop) | ~0.4 s | vectorized |
+| `lu_factor` | 0.88 s | 0.87 s |
 
 The far pass is already well engineered — preallocated `out=` buffers, one
 Bessel evaluation per tile, `y0`/`j0` written straight into the halves of the
@@ -169,20 +174,27 @@ computation — 32 768 calls to the first alone at n=2048, plus 131 072
 interpreter lock, which is why four threads return 1.57x rather than the ~3.3x
 the far pass alone achieves.
 
-Two fixes, both using machinery the repo already has:
+Two fixes were proposed, both using machinery the repo already has. **The first
+was done; the measurement then redirected the second.**
 
-1. **Vectorize the near classification.** The predicates are simple geometry,
-   and `assembly/separation.py:close_pairs` already computes exactly this kind
-   of mask for all pairs at once with broadcasting. Worth roughly 13 % of
-   assembly and, more importantly, it is most of what is blocking the threads.
-2. **Batch the touching/self pairs.**
-   `_integrate_linear_touching_duffy_sk_vectorized` is called once per pair
-   (8 192 calls, 1.59 s). It is vectorized internally but tiny per call. The
-   batching path `_integrate_linear_pairs_box_sk_batched` already exists for the
-   fixed-order class; extending it to the touching class is the same pattern.
+1. **Vectorize the near classification** — done. `_near_fixed_order_positions`
+   evaluates the three exclusions (self panel, shared endpoint, adaptive) and
+   the order ladder for every pair at once, in bounded chunks. The bucketing is
+   identical pair for pair, and the assembled fields are bit-identical.
 
-Expected: Galerkin assembly from 1.57x to roughly 2.5-3x on four cores. This is
-the same class of problem as the Pulse chunk-size fix, one level down.
+   It was worth **less than this review projected**: 14.06 -> 13.65 s at one
+   thread and 8.95 -> 8.33 s at four, so scaling moved 1.57x -> 1.64x, not the
+   2.5-3x estimated here. The per-pair loop was about 0.4 s, not the ~1.8 s the
+   call counts suggested — `_linear_shared_interval_endpoint_info` is 32,768
+   calls but each is trivial.
+
+2. **Batch the touching/self pairs** — *not* done, because re-profiling after
+   step 1 changed the priority. The touching path is 1.56 s of 13.65 s, while
+   the far pass is now 76 %, and one line inside it —`_axpy_into`, 2.35 s over
+   8,452 calls — is larger than the whole touching path. Batching the touching
+   pairs is also the highest-risk edit in the solver (per-pair orientation flags
+   through a Duffy map, in the near field). It is still worth ~11 %, but the far
+   pass is the better next target. See §6.
 
 ### What is *not* an opportunity
 
@@ -242,3 +254,31 @@ Pulse dense already peaks lower than Galerkin on the same problem (231 vs
 `blas_threads`, without measurements on the 64-96 core nodes these actually run
 on. Everything in §4 was measured on four cores; the scaling conclusions should
 be re-checked there before acting on the numbers.
+
+---
+
+## 6. Done here, and what is left
+
+Done on this branch:
+
+- Near classification vectorized (§4.1). Bit-identical; 1.57x -> 1.64x.
+- Dispatch collapsed: the seven copies of the sample-record block became one
+  `record_samples` helper, the duplicate TE Robin branch was removed so both
+  polarizations take one route, the previously unreachable TE label is live
+  again, and the vestigial `formulation_label` default is gone.
+  `solve_monostatic_rcs_2d_single_polarization` went **837 -> 726 lines** with
+  bit-identical fields on PEC, IBC, dielectric and coated cases.
+  `_solve_te_robin_mfie` survives as a documented guarded alias only because
+  `test_direct_solver_methods` pins a retired-`solver_method` contract on it;
+  delete both together if that contract is not wanted.
+
+Left, in the order I would take them:
+
+| item | size | risk |
+|---|---|---|
+| Far-pass accumulation: `_axpy_into` is 2.35 s over 8,452 calls, two full passes over the tile each. The per-tile accumulators are all weighted sums of the *same* kernel tile, so they may fuse. | up to ~17 % of Galerkin assembly | medium; the far pass is well covered by tests |
+| Batch the touching/self pairs by orientation group | ~11 % | high — near-field accuracy |
+| Pulse FMM source/target split (audit F7) | ~9 % of FMM time | low |
+| `blas_threads: "auto"` in both drivers, and thread guidance in the headers | usability | low |
+| GUI: let Automatic pick the basis; demote the seven resource knobs | usability, and prevents the F2/F3 accuracy traps | low, but a product decision |
+| Audit F2 / F3 / F4 (Pulse convergence order, TE resonances, backend-dependent TM PEC formulation) | correctness | design decisions, not patches |
