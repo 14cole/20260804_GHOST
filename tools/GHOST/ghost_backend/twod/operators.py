@@ -1176,13 +1176,33 @@ def _axpy_into(acc: 'np.ndarray', src: 'np.ndarray', coeff: 'float',
                scratch: 'np.ndarray') -> 'None':
     """acc += coeff * src, in place, without allocating a temporary.
 
-    Deliberately not scipy's BLAS axpy: its f2py wrapper carries a fixed
-    per-call cost of several milliseconds, which swamps a cache-sized tile and
-    only pays for itself on arrays of millions of elements.
+    Deliberately not scipy's BLAS axpy, though not for the reason an earlier
+    comment here gave: its f2py overhead is microseconds, not milliseconds, and
+    zaxpy writes into its y argument, so pinned to one thread it is about 1.95x
+    faster for exactly equal results. It loses because BLAS threads itself
+    while this assembly is already thread-parallel at the tile level -- swapping
+    it in measured 13.65 -> 12.65 s at one assembly thread but 8.33 -> 13.98 s
+    at four. Gating on the thread count would make threaded and serial runs
+    differ in their last bits, which _expand_near_chunks exists to prevent.
     """
 
     np.multiply(src, coeff, out=scratch)
     np.add(acc, scratch, out=acc)
+
+
+def _accumulate_first(acc: 'np.ndarray', src: 'np.ndarray', coeff: 'float',
+                      index: 'int', scratch: 'np.ndarray') -> 'None':
+    """acc = coeff*src on the first index, acc += coeff*src afterwards.
+
+    Overwriting on the first source node is what lets the partial sums skip a
+    zero fill per observation node, which would otherwise cost about as much as
+    the accumulations it saves.
+    """
+
+    if index:
+        _axpy_into(acc, src, coeff, scratch)
+    else:
+        np.multiply(src, coeff, out=acc)
 
 
 def _far_kernel_argument(k0: 'Union[complex, float]', dist: 'np.ndarray',
@@ -1634,6 +1654,8 @@ def _assemble_linear_operator_matrices_multi(
     abs_k = abs(complex(k0))
 
     n_acc = width**2 * (int(want_s) + (2 if want_k else 0))
+    # Partial sums per source basis function, alongside the accumulators.
+    n_acc += width * (int(want_s) + (2 if want_k else 0))
     n_kernel = int(want_s) + (2 if want_k else 0)
     tile = _assembly_tile_size(nelems, 16 * (n_acc + n_kernel + 1) + 8 * 7)
 
@@ -1752,6 +1774,23 @@ def _assemble_linear_operator_matrices_multi(
                 [np.zeros((mb, nb), dtype=np.complex128) for _ in range(width**2)]
                 if (want_k and mirrored) else None
             )
+            # One partial sum per source basis function. The coefficient
+            # w*phi_o[a]*phi_s[b] is separable, so the source-quadrature loop
+            # can accumulate phi_s[b] alone and pay the phi_o[a] fold-in once
+            # per observation node instead of once per quadrature pair. That
+            # turns width**2 accumulations per pair into width.
+            part_s = (
+                [np.empty((mb, nb), dtype=np.complex128) for _ in range(width)]
+                if want_s else None
+            )
+            part_k = (
+                [np.empty((mb, nb), dtype=np.complex128) for _ in range(width)]
+                if want_k else None
+            )
+            part_kt = (
+                [np.empty((mb, nb), dtype=np.complex128) for _ in range(width)]
+                if (want_k and mirrored) else None
+            )
             g_buf = np.empty((mb, nb), dtype=np.complex128) if want_s else None
             h1_buf = np.empty((mb, nb), dtype=np.complex128) if want_k else None
             dk_buf = np.empty((mb, nb), dtype=np.complex128) if want_k else None
@@ -1799,7 +1838,6 @@ def _assemble_linear_operator_matrices_multi(
                         if want_k:
                             far_hankel(k0, real_k, dist, krbuf, work, h1_buf)
 
-                    w = w_obs_qi * w_src_qj
                     if want_k:
                         np.multiply(dx, n_ij[0], out=proj)
                         np.multiply(dy, n_ij[1], out=work)
@@ -1808,14 +1846,12 @@ def _assemble_linear_operator_matrices_multi(
                         np.multiply(h1_buf, proj, out=dk_buf)
                         if dgreen_sign < 0.0:
                             np.negative(dk_buf, out=dk_buf)
-                    for a in range(width):
-                        coeff_a = w * float(phi_o[a])
-                        for b in range(width):
-                            coeff = coeff_a * float(phi_s[b])
-                            if acc_s is not None:
-                                _axpy_into(acc_s[width * a + b], g_buf, coeff, cscratch)
-                            if acc_k is not None:
-                                _axpy_into(acc_k[width * a + b], dk_buf, coeff, cscratch)
+                    for b in range(width):
+                        coeff_b = w_src_qj * float(phi_s[b])
+                        if part_s is not None:
+                            _accumulate_first(part_s[b], g_buf, coeff_b, qj, cscratch)
+                        if part_k is not None:
+                            _accumulate_first(part_k[b], dk_buf, coeff_b, qj, cscratch)
 
                     if acc_kt is not None:
 
@@ -1828,12 +1864,23 @@ def _assemble_linear_operator_matrices_multi(
                         if dgreen_sign > 0.0:
                             np.negative(dk_buf, out=dk_buf)
                         for a in range(width):
-                            coeff_a = w * float(phi_s[a])
-                            for b in range(width):
-                                _axpy_into(
-                                    acc_kt[width * a + b], dk_buf,
-                                    coeff_a * float(phi_o[b]), cscratch,
-                                )
+                            _accumulate_first(
+                                part_kt[a], dk_buf, w_src_qj * float(phi_s[a]),
+                                qj, cscratch,
+                            )
+
+                for a in range(width):
+                    coeff_a = w_obs_qi * float(phi_o[a])
+                    for b in range(width):
+                        if acc_s is not None:
+                            _axpy_into(acc_s[width * a + b], part_s[b], coeff_a, cscratch)
+                        if acc_k is not None:
+                            _axpy_into(acc_k[width * a + b], part_k[b], coeff_a, cscratch)
+                if acc_kt is not None:
+                    for b in range(width):
+                        coeff_b = w_obs_qi * float(phi_o[b])
+                        for a in range(width):
+                            _axpy_into(acc_kt[width * a + b], part_kt[a], coeff_b, cscratch)
 
             len_prod = obs_len[:, None] * src_len[None, :]
             with write_lock:

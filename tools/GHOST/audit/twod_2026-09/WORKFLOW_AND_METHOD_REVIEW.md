@@ -276,9 +276,61 @@ Left, in the order I would take them:
 
 | item | size | risk |
 |---|---|---|
-| Far-pass accumulation: `_axpy_into` is 2.35 s over 8,452 calls, two full passes over the tile each. The per-tile accumulators are all weighted sums of the *same* kernel tile, so they may fuse. | up to ~17 % of Galerkin assembly | medium; the far pass is well covered by tests |
+| ~~Far-pass accumulation~~ — **done**, see §7 | 10 % at one thread, 8.6 % at four | — |
 | Batch the touching/self pairs by orientation group | ~11 % | high — near-field accuracy |
 | Pulse FMM source/target split (audit F7) | ~9 % of FMM time | low |
 | `blas_threads: "auto"` in both drivers, and thread guidance in the headers | usability | low |
 | GUI: let Automatic pick the basis; demote the seven resource knobs | usability, and prevents the F2/F3 accuracy traps | low, but a product decision |
 | Audit F2 / F3 / F4 (Pulse convergence order, TE resonances, backend-dependent TM PEC formulation) | correctness | design decisions, not patches |
+
+---
+
+## 7. Far-pass accumulation
+
+The accumulation coefficient is `w * phi_o[a] * phi_s[b]`, which is separable:
+`phi_o[a]` depends only on the observation node and `phi_s[b]` only on the
+source node. The loop was applying both inside the innermost quadrature pair,
+so it ran `width**2` accumulations per pair. It now accumulates `width` partial
+sums over the source quadrature and folds `phi_o[a]` in once per observation
+node, which is `width * n_q**2 + width**2 * n_q` accumulations instead of
+`width**2 * n_q**2`.
+
+| | before | after |
+|---|---:|---:|
+| n=2048, one thread | 13.65 s | **12.29 s** |
+| n=2048, four threads | 8.33 s | **7.61 s** |
+| `_axpy_into` | 2.35 s / 8,452 calls | **1.31 s / 5,964 calls** |
+
+Against the original pre-audit baseline that is 14.06 -> 12.29 s serial and
+8.95 -> 7.61 s on four threads.
+
+The partial sums skip a per-observation-node zero fill by overwriting on the
+first source node (`_accumulate_first`), which would otherwise have cost about
+as much as the accumulations saved. `n_acc` in the tile-size budget now counts
+the extra buffers, so tiles shrink to keep the same working set.
+
+This is **not** bit-identical: summing per observation node and then folding is
+a different association order. The measured change is **1.5e-15** relative on
+PEC, IBC, dielectric and coated geometries in both polarizations -- round-off,
+and the same order regardless of thread count, so the solver's thread-
+reproducibility property is preserved. The mirrored `acc_kt` path, which swaps
+the basis indices, was confirmed exercised (24 fold-ins on the coated case)
+before trusting that agreement.
+
+### A dead end worth recording
+
+`_axpy_into` carried a comment rejecting SciPy's BLAS axpy because "its f2py
+wrapper carries a fixed per-call cost of several milliseconds". That reason is
+wrong by three orders of magnitude -- the real overhead is a few microseconds,
+and `zaxpy` writes into its `y` argument and returns it, so it is one pass over
+three arrays against two passes over four. Pinned to one BLAS thread it is
+**1.95x faster** across tile sizes from 0.25 to 30 MiB, for exactly equal
+results.
+
+It is still the wrong choice, for a different reason. BLAS threads itself, and
+the assembly is already thread-parallel at the tile level, so the two fight:
+swapping `_axpy_into` for `zaxpy` measured 13.65 -> 12.65 s at one assembly
+thread but **8.33 -> 13.98 s at four**. Gating it on the thread count would make
+a one-thread run and a four-thread run give different last bits, which is
+exactly the property `_expand_near_chunks` is written to preserve. Reverted.
+The comment should be corrected rather than the code changed.
