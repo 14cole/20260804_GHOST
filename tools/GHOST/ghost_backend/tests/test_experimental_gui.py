@@ -98,7 +98,7 @@ class ExperimentalGUI(unittest.TestCase):
                 max_panels=kwargs.get('max_panels', rcs.MAX_PANELS_DEFAULT)))
         with mock.patch('ghost_backend.ui.solver.solve_monostatic_rcs_2d_certified', side_effect=build_actual_fine_mesh):
             with mock.patch.dict(os.environ, {'GHOST_CPU_FACTORIZATION': 'dense'}):
-                with self.assertRaisesRegex(ValueError, 'limit is 20000'):
+                with self.assertRaisesRegex(ValueError, 'limit is 20000|configured panel limit'):
                     worker._run_2d(value, None)
             with mock.patch.dict(os.environ, {'GHOST_CPU_FACTORIZATION': 'compressed'}):
                 # Every already-discretized primitive receives at least two

@@ -28,6 +28,11 @@ class ExecutionOptionsWidget(QGroupBox):
             self.factor_combo.addItem(label, value)
         self.factor_combo.setToolTip('Automatic chooses a compatible dense, compressed, or FMM backend using predicted runtime and available RAM. Numerical accuracy settings stay in force. Other choices are expert overrides; the selected backend and its reason are recorded with results.')
         form.addRow('Solver backend override', self.factor_combo)
+        self.basis_combo=QComboBox()
+        self.basis_combo.addItem('Galerkin (linear / adaptive polynomial)','galerkin')
+        self.basis_combo.addItem('Pulse / midpoint collocation','pulse')
+        self.basis_combo.setToolTip('Pulse uses one constant density per panel and supports PEC/IBC bodies and bulk dielectric interfaces. Thin sheets and thin-layer approximations require Galerkin. Keep mesh certification enabled when comparing accuracy.')
+        form.addRow('Boundary discretization',self.basis_combo)
         self.ram_spin = QDoubleSpinBox()
         self.ram_spin.setRange(0, 1048576)
         self.ram_spin.setDecimals(3)
@@ -88,7 +93,7 @@ class ExecutionOptionsWidget(QGroupBox):
             initial = efficient_defaults()
             self.notice.setText('Invalid launch settings. Default execution settings are shown; review them before running.')
         self.set_value(initial)
-        for widget in (self.factor_combo, self.rhs_combo, self.mesh_combo):
+        for widget in (self.factor_combo, self.rhs_combo, self.mesh_combo, self.basis_combo):
             widget.currentIndexChanged.connect(self._changed)
         self.ram_spin.valueChanged.connect(self._ram_changed)
         for widget in (self.ram_spin, self.storage_spin, self.assembly_spin, self.blas_spin, self.batch_spin):
@@ -111,6 +116,7 @@ class ExecutionOptionsWidget(QGroupBox):
     def value(self):
         result = dict(self._retained)
         result.update(factorization=self.factor_combo.currentData(),
+                      discretization=self.basis_combo.currentData(),
                       mesh_strategy=self.mesh_combo.currentData(),
                       ram_budget_gib=(self.ram_spin.value() or None) if self._ram_edited else self._retained['ram_budget_gib'],
                       compressed_storage_mib=self.storage_spin.value(),
@@ -122,12 +128,13 @@ class ExecutionOptionsWidget(QGroupBox):
 
     def set_value(self, raw):
         value = validate_options(raw)
-        widgets = (self.factor_combo, self.rhs_combo, self.mesh_combo, self.ram_spin, self.storage_spin,
+        widgets = (self.factor_combo, self.rhs_combo, self.mesh_combo, self.basis_combo, self.ram_spin, self.storage_spin,
                    self.assembly_spin, self.blas_spin, self.batch_spin, self.temp_edit)
         blockers = [QSignalBlocker(widget) for widget in widgets]
         self._retained = value
         self._ram_edited = False
         self.factor_combo.setCurrentIndex(self.factor_combo.findData(value['factorization']))
+        self.basis_combo.setCurrentIndex(self.basis_combo.findData(value['discretization']))
         self.mesh_combo.setCurrentIndex(self.mesh_combo.findData(value['mesh_strategy']))
         self.rhs_combo.setCurrentIndex(self.rhs_combo.findData(value['rhs_compression']))
         self.ram_spin.setValue(value['ram_budget_gib'] or 0)

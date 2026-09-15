@@ -40,15 +40,16 @@ def near_pairs(geometry, budget, count_only=False):
 
 class GalerkinKernel:
     def __init__(self, mesh, k, order=8, eps=1e-10, threads=1,
-                 budget=2*1024**3, checkpoint=None, geometry=None, pairs=None):
+                 budget=2*1024**3, checkpoint=None, geometry=None, pairs=None, quadrature=0):
         self.mesh, self.k, self.eps, self.threads = mesh, complex(k), eps, threads
         self.checkpoint = checkpoint or (lambda: None)
         self.geometry = geometry or AssemblyGeometry(mesh)
         g=self.geometry
         if not len(g.lengths) or np.any(g.lengths<=0): raise ValueError('FMM needs nondegenerate panels.')
         self.n=len(mesh.nodes);self.m=len(g.lengths);self.width=g.node_ids.shape[1]
-        self.order=max(8,int(order),int(np.ceil(abs(k)*g.lengths.max()/2))+4)
-        if self.order>64: raise ValueError('FMM quadrature needs a finer mesh (order exceeds 64).')
+        from ghost_backend.twod.fmm.quadrature import quadrature_order
+        minimum=max(8,quadrature) if self.width>2 else quadrature
+        self.order,self.quadrature_policy=quadrature_order(k,g.lengths.max(),minimum,order,eps)
         if 64*self.m*self.order>budget or pairs is not None and len(pairs)*576*self.width**2>budget:
             raise MemoryError('FMM geometry and near workspace exceed the configured storage budget.')
         t,w=np.polynomial.legendre.leggauss(self.order);t=(t+1)/2;w=w/2
@@ -67,16 +68,24 @@ class GalerkinKernel:
 
     def _build(self):
         from ghost_backend.twod.operators import _sk_blocks_near_linear
-        rr=[];cc=[];delta={kind:[] for kind in ('S','KP','W')};exact={kind:[] for kind in delta}
+        # Numeric buffers avoid a Python object for every sparse scalar/index.
+        entries=self.width**2*sum(1 if i==j else 2 for i,j in self.pairs)
+        rr=np.empty(entries,np.int64);cc=np.empty(entries,np.int64)
+        delta={kind:np.empty(entries,complex) for kind in ('S','KP','W')}
+        exact={kind:np.empty(entries,complex) for kind in delta}
+        cursor=0
         g=self.geometry;q=self.order;p=self.phi
         derivative=derivative_matrix(self.width-1)
         points=self.points.reshape(self.m,q,2);weights=self.weights.reshape(self.m,q)
         def append(i,j,s,kp,bs,bkp):
+            nonlocal cursor
             normal=np.dot(g.normals[i],g.normals[j])
             maue=lambda b: -self.k**2*normal*b+derivative.T@b@derivative/(g.lengths[i]*g.lengths[j])
-            rr.extend(np.repeat(self.width*i+np.arange(self.width),self.width));cc.extend(np.tile(self.width*j+np.arange(self.width),self.width))
+            sl=slice(cursor,cursor+self.width**2);cursor+=self.width**2
+            rr[sl]=np.repeat(self.width*i+np.arange(self.width),self.width)
+            cc[sl]=np.tile(self.width*j+np.arange(self.width),self.width)
             for kind,a,b in (('S',s,bs),('KP',kp,bkp),('W',maue(s),maue(bs))):
-                delta[kind].extend((a-b).ravel());exact[kind].extend(a.ravel())
+                delta[kind][sl]=(a-b).ravel();exact[kind][sl]=a.ravel()
         for num,(i,j) in enumerate(self.pairs):
             if num%64==0:self.checkpoint()
             difference=points[i,:,None]-points[j,None,:]
@@ -97,8 +106,10 @@ class GalerkinKernel:
         for kind in delta:
             self.correction[kind]=coo_matrix((delta[kind],(rr,cc)),shape=(self.width*self.m,self.width*self.m)).tocsr()
             self.near[kind]=coo_matrix((exact[kind],(rr,cc)),shape=(self.width*self.m,self.width*self.m)).tocsr()
-        self.correction['K']=self.correction['KP'].T.tocsr()
-        self.near['K']=self.near['KP'].T.tocsr()
+            self.correction[kind].eliminate_zeros();self.near[kind].eliminate_zeros()
+        # CSC transpose views share the KP data, indices and pointer storage.
+        self.correction['K']=self.correction['KP'].T
+        self.near['K']=self.near['KP'].T
 
     def _project(self, y, coefficient, derivative=False):
         y=y.reshape(self.m,self.order,-1)*self.weights.reshape(self.m,self.order,1)
@@ -109,9 +120,13 @@ class GalerkinKernel:
         return self.P.T@out.reshape(self.width*self.m,-1)
 
     def apply(self, kind, x, source_mask=None, coefficient=None):
-        self.checkpoint();self.calls+=1
         x=np.asarray(x,complex);vector=x.ndim==1
         if vector:x=x[:,None]
+        width=2 if kind=='W' else 8
+        if x.shape[1]>width:
+            return np.column_stack([self.apply(kind,x[:,j:j+width],source_mask,coefficient)
+                                    for j in range(0,x.shape[1],width)])
+        self.checkpoint();self.calls+=1
         local=(self.P@x).reshape(self.m,self.width,-1)
         if source_mask is not None:local*=np.asarray(source_mask)[:,None,None]
         density=np.einsum('qa,ear->eqr',self.phi,local).reshape(self.m*self.order,-1)
@@ -135,13 +150,53 @@ class GalerkinKernel:
         y+=self.P.T@corr
         return y[:,0] if vector else y
 
+    def apply_combined(self,x,eta,adjoint=False):
+        """Apply K+eta*S in one density channel, including its exact adjoint."""
+        x=np.asarray(x,complex);vector=x.ndim==1
+        if vector:x=x[:,None]
+        if x.shape[1]>8:
+            return np.column_stack([self.apply_combined(x[:,j:j+8],eta,adjoint)
+                                    for j in range(0,x.shape[1],8)])
+        self.checkpoint();self.calls+=1
+        local=(self.P@(x.conj() if adjoint else x)).reshape(self.m,self.width,-1)
+        density=np.einsum('qa,ear->eqr',self.phi,local).reshape(len(self.points),-1)
+        strengths=self.weights[:,None]*density
+        value,gradient=evaluate(self.points,self.k,
+            charges=strengths if adjoint else eta*strengths,
+            dipoles=None if adjoint else strengths,normals=self.normals,
+            gradient=adjoint,eps=self.eps,threads=self.threads,plan=self.native_plan)
+        if adjoint:
+            value=eta*value+np.einsum('qcr,qc->qr',gradient,self.normals)
+        y=self._project(value,None)
+        inc=local.reshape(self.width*self.m,-1)
+        y+=self.P.T@(self.correction['KP' if adjoint else 'K']@inc+eta*(self.correction['S']@inc))
+        if adjoint:y=y.conj()
+        return y[:,0] if vector else y
+
     def apply_many(self,requests):
         """Share a native tree traversal among material routes and S/K' loads."""
         if len(requests)==1:return [self.apply(*requests[0])]
+        if sum(3 if r[0]=='W' else 1 for r in requests)>8:
+            results=[];chunk=[];loads=0
+            for request in requests:
+                cost=3 if request[0]=='W' else 1
+                if loads+cost>8:
+                    results.extend(self.apply_many(chunk));chunk=[];loads=0
+                chunk.append(request);loads+=cost
+            return results+self.apply_many(chunk)
+        # Bound projected point arrays as well as the native workspace. Final
+        # node-space outputs are the only arrays spanning the full RHS batch.
+        columns=np.asarray(requests[0][1]).shape
+        width=max(1,8//sum(3 if r[0]=='W' else 1 for r in requests))
+        if len(columns)==2 and columns[1]>width:
+            chunks=[self.apply_many([(kind,x[:,j:j+width],mask,c) for kind,x,mask,c in requests])
+                    for j in range(0,columns[1],width)]
+            return [np.column_stack([c[i] for c in chunks]) for i in range(len(requests))]
         self.checkpoint();self.calls+=1
         groups={};routes=[];charges=[];dipoles=[];start=0
         want_gradient=any(r[0]=='KP' for r in requests)
         has_dipole=any(r[0]=='K' for r in requests)
+        has_charge=any(r[0]!='K' for r in requests)
         for kind,x,mask,coefficient in requests:
             x=np.asarray(x,complex);vector=x.ndim==1
             if vector:x=x[:,None]
@@ -158,11 +213,11 @@ class GalerkinKernel:
                     d=derivative.reshape(len(self.points),-1)*self.weights[:,None]
                     strength=np.column_stack((d,strength*self.normals[:,0,None],strength*self.normals[:,1,None]))
                 count=strength.shape[1]
-                charges.append(np.zeros_like(strength) if kind=='K' else strength)
-                dipoles.append(strength if kind=='K' else np.zeros_like(strength))
+                if has_charge:charges.append(np.zeros_like(strength) if kind=='K' else strength)
+                if has_dipole:dipoles.append(strength if kind=='K' else np.zeros_like(strength))
                 group=(start,start+count);candidates.append((local,group));start+=count
             routes.append((kind,local,coefficient,group,vector))
-        value,gradient=evaluate(self.points,self.k,np.column_stack(charges),
+        value,gradient=evaluate(self.points,self.k,np.column_stack(charges) if has_charge else None,
             dipoles=np.column_stack(dipoles) if has_dipole else None,normals=self.normals,
             gradient=want_gradient,eps=self.eps,threads=self.threads,plan=self.native_plan)
         results=[]
@@ -189,4 +244,8 @@ class GalerkinKernel:
     def storage_bytes(self):
         arrays=(self.points,self.weights,self.normals,self.ids)
         matrices=list(self.near.values())+list(self.correction.values())+[self.P]
-        return sum(a.nbytes for a in arrays)+sum(a.data.nbytes+a.indices.nbytes+a.indptr.nbytes for a in matrices)
+        buffers={}
+        for a in list(arrays)+[b for a in matrices for b in (a.data,a.indices,a.indptr)]:
+            while isinstance(a.base,np.ndarray):a=a.base
+            buffers[id(a)]=a.nbytes
+        return sum(buffers.values())

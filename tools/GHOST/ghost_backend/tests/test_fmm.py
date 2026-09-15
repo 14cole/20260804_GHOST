@@ -47,7 +47,7 @@ class FMMTests(unittest.TestCase):
         # Distinct nearby angles are compressible but remain valid output keys.
         result=rcs.solve_monostatic_rcs_2d(fixture('pec',32),[1.],list(np.linspace(20.,21.,19)),
             geometry_units='meters',solver_method='fmm',compute_condition_number=False,
-            execution_options=dict(rhs_compression='off'))
+            execution_options=dict(rhs_compression='off',fmm_pec_cfie=False))
         for factor in result['metadata']['fmm_factors']:
             self.assertEqual(factor['input_rhs_columns'],19)
             self.assertEqual(factor['solved_rhs_columns'],19)
@@ -103,7 +103,8 @@ class FMMTests(unittest.TestCase):
                 args=(snapshot,[.6],[0.,37.,90.])
                 a=rcs.solve_monostatic_rcs_2d(*args,geometry_units='meters')
                 with patch('ghost_backend.linalg.dense.DenseFactor',side_effect=AssertionError('Dense fallback')):
-                    b=rcs.solve_monostatic_rcs_2d(*args,geometry_units='meters',solver_method='fmm')
+                    b=rcs.solve_monostatic_rcs_2d(*args,geometry_units='meters',solver_method='fmm',
+                        execution_options=dict(fmm_pec_cfie=False))
                 for pol in ('VV','HH'):
                     self.assertLess(np.max(abs(fields(a,pol)-fields(b,pol)))/np.max(abs(fields(a,pol))),3e-8)
                 self.assertEqual(b['metadata']['solver_method'],'galerkin_fmm_gmres')

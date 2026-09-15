@@ -33,7 +33,9 @@ def solve_fields(mesh, matrix, k0, angles, rhs_builder, diagnostics, label,
     gpu = (not hierarchical and state is None and diagnostics is None and rcs.requested_precision() != 'mixed'
            and (requested == 'gpu' or requested == 'auto' and len(matrix) >= threshold))
     batch_size = len(angles) if gpu else configured_batch_size()
-    if fmm:batch_size=min(batch_size,32)
+    if fmm:
+        from ghost_backend.twod.fmm.memory import rhs_batch_size
+        batch_size=rhs_batch_size(len(matrix),batch_size)
     if coordinates is None and len(matrix) in (len(mesh.nodes), 2*len(mesh.nodes)):
         xy = np.zeros((len(mesh.nodes), 2))
         for element in mesh.elements:
@@ -52,7 +54,7 @@ def solve_fields(mesh, matrix, k0, angles, rhs_builder, diagnostics, label,
         solve as solve_sweep,
         mode as compression_mode,
     )
-    sweep_basis = (SweepBasis(batch_size) if factor is not None and len(angles) >= 32
+    sweep_basis = (SweepBasis(batch_size) if factor is not None and not fmm and len(angles) >= 32
                    and compression_mode() != 'off' else None)
     for start in range(0, len(angles), batch_size):
         if checkpoint is not None:

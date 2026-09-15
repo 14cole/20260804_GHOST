@@ -261,11 +261,14 @@ class RunSetupMixin:
         precision = self.cmb_lu_precision
         factor = self.execution_options_widget.factor_combo.currentData()
         solver = self.cmb_solver_kind
+        if self.execution_options_widget.basis_combo.currentData()=='pulse':
+            mesh_combo=self.execution_options_widget.mesh_combo
+            mesh_combo.setCurrentIndex(mesh_combo.findData('global'))
         if solver.currentData() == '2d' and factor == 'adaptive':
             method.setCurrentIndex(method.findData('auto'))
         if solver.currentData() == '2d' and factor in ('compressed', 'fmm'):
             method.setCurrentIndex(method.findData('experimental_cpu'))
-        if factor != 'dense':
+        if factor != 'dense' or self.execution_options_widget.basis_combo.currentData()=='pulse':
             precision.setCurrentIndex(precision.findData('double'))
         if hasattr(self, 'btn_advanced_settings'):
             self._apply_job_state()

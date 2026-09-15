@@ -17,7 +17,18 @@ class FMMSystem(LinearOperator):
 
     def __len__(self):return self.shape[0]
 
+    def add_combined_field(self,kernel,eta):
+        """Closed PEC route; retain separate terms for near ILU and inspection."""
+        if self.terms or len(self)!=kernel.n:
+            raise ValueError('Combined field requires an unmapped, single-kernel system.')
+        self.combined_field_eta=complex(eta)
+        self.add(kernel,'K')
+        self.add(kernel,'S',weight=eta)
+        self._combined_kernel=kernel
+
     def add(self,kernel,kind,rows=None,cols=None,weight=1.,mask=None,coefficient=None):
+        if hasattr(self,'_combined_kernel'):
+            raise ValueError('A fused PEC system cannot accept additional material routes.')
         nn=kernel.n;ids=np.arange(nn)
         r=ids if rows is None else np.asarray(rows)
         c=ids if cols is None else np.asarray(cols)
@@ -35,6 +46,11 @@ class FMMSystem(LinearOperator):
             x=x.copy();x[self.endpoints]=0
             result=self.jumps.conj().T@x
         else:result=self.jumps@x
+        if hasattr(self,'_combined_kernel'):
+            result+=self._combined_kernel.apply_combined(x,self.combined_field_eta,adjoint)
+            if adjoint:result[self.endpoints]+=original[self.endpoints]
+            else:result[self.endpoints]=x[self.endpoints]
+            return result[:,0] if vector else result
         groups={}
         for kernel,kind,R,C,mask,coefficient in self.terms:
             if adjoint:
@@ -76,6 +92,8 @@ class FMMSystem(LinearOperator):
             operator_storage_bytes=sum(k.storage_bytes for k in self.kernels),
             kernel_tolerances=[k.eps for k in self.kernels],
             quadrature_orders=[k.order for k in self.kernels],
+            quadrature_policies=[k.quadrature_policy for k in self.kernels],
+            combined_field_fused=hasattr(self,'_combined_kernel'),
             dense_matrix_built=False,approximation_error_certified=False,
             spatial_coarse_eligible=self.spatial_coarse_eligible,
             residual_operator='locally_corrected_fmm_galerkin')

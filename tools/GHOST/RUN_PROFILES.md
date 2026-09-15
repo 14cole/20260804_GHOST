@@ -20,7 +20,7 @@ The saved factorization value is `adaptive`; the legacy factorization value
 `auto` still means hierarchical factorization with dense fallback.
 
 Schedules with at most 4,096 candidate combinations are compared exhaustively;
-larger searches are bounded. The shared `geometry_work_v2` cost model is a
+larger searches are bounded. The shared `geometry_work_v3_pulse` cost model is a
 conservative heuristic, not a guarantee of the fastest wall time. It uses no
 trial solves and does not model queue delays. The model favors dense solves for
 small and medium systems, while FMM offers a path beyond dense storage capacity.

@@ -38,7 +38,8 @@ def kernel(mesh,k,order=8):
         previous=next(iter(cache.values()),None)
         cache[tag]=GalerkinKernel(mesh,k,order,eps=option('fmm_tolerance',1e-10),
             threads=effective_assembly_threads(),budget=budget,checkpoint=checkpoint,
-            geometry=previous.geometry if previous else None,pairs=previous.pairs if previous else None)
+            geometry=previous.geometry if previous else None,pairs=previous.pairs if previous else None,
+            quadrature=option('fmm_quadrature_order',0))
     return cache[tag]
 
 
@@ -49,16 +50,22 @@ def native(mesh,infos,pol,k0,kind,obs_order=8,src_order=8):
     oracle=NativeOracle(mesh,infos,pol,k0,kind,obs_order,src_order)
     n=oracle.nn;mass=oracle.mass;ids=np.arange(n);f=kernel(mesh,k0,max(obs_order,src_order))
     if kind=='robin':
-        if pol=='TM' and np.all(oracle.pec_nodes) and option('fmm_pec_cfie',False):
+        cfie=option('fmm_pec_cfie','auto')
+        if pol=='TM' and np.all(oracle.pec_nodes) and not np.any(oracle.alpha) and cfie:
             endpoints=f.geometry.node_ids[:,:2].ravel()
             degree=np.bincount(endpoints,minlength=n)[np.unique(endpoints)]
-            if np.any(degree!=2):raise ValueError('FMM PEC combined field requires closed contours.')
+            closed=np.all(degree==2)
+            if not closed and cfie is True:
+                raise ValueError('FMM PEC combined field requires closed contours.')
             # Internal GHOST normals point into a PEC body. The exterior DLP
             # trace is therefore +M/2+K for G=i H0^(2)/4.
-            a=FMMSystem(n,.5*mass)
-            a.combined_field_eta=1j*k0
-            a.add(f,'K');a.add(f,'S',weight=a.combined_field_eta)
-            return a,oracle
+            # In these inward-normal, H0^(2) conventions the outgoing CFIE
+            # coupling is -ik. Preserve the same coupling in field projection.
+            if closed:
+                a=FMMSystem(n,.5*mass)
+                a.add_combined_field(f,-1j*k0)
+                a.preferred_recycle_vectors=0
+                return a,oracle
         jumps=-.5*mass
         if np.any(oracle.pec_nodes):
             jumps=jumps.multiply((~oracle.pec_nodes)[:,None])
@@ -72,6 +79,8 @@ def native(mesh,infos,pol,k0,kind,obs_order=8,src_order=8):
         if np.any(robin>=0):
             a.add(f,'KP',rows=robin)
             if np.any(oracle.alpha):a.add(f,'S',rows=robin,coefficient=oracle.alpha)
+        if pol=='TE' and not np.any(oracle.alpha):
+            a.preferred_recycle_vectors=0
     elif kind=='sheet':
         a=FMMSystem(n,-oracle.weighted)
         a.add(f,'S' if pol=='TM' else 'W');a.endpoints=oracle.endpoints

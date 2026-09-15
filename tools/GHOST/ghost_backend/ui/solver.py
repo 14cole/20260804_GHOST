@@ -1455,7 +1455,7 @@ class SolverTab(RunSetupMixin, QWidget):
         for control in (self.save_run_setup_button, self.load_run_setup_button, self.run_preflight_button):
             control.setEnabled(not busy)
         self._sync_export_state()
-        self.btn_currents.setEnabled(not busy and not is_bor)
+        self.btn_currents.setEnabled(not busy and not is_bor and self.execution_options_widget.basis_combo.currentData()!='pulse')
         self.btn_browse_geo.setEnabled(not busy)
         self.btn_use_tab.setEnabled(not busy)
         self.btn_browse_output.setEnabled(not busy)
@@ -1494,10 +1494,14 @@ class SolverTab(RunSetupMixin, QWidget):
         factor_widget.setEnabled(not busy and method_available)
         self.cmb_solver_method.setEnabled(not busy and method_available and factor not in ('compressed', 'adaptive','fmm'))
         self.execution_options_widget.mesh_combo.setEnabled(not busy and method_available)
+        self.execution_options_widget.basis_combo.setEnabled(not busy and method_available)
         if not is_bor and not method_available:
             combo = self.execution_options_widget.mesh_combo
             combo.setCurrentIndex(combo.findData('global'))
-        self.cmb_lu_precision.setEnabled(not busy and not experimental and factor == 'dense')
+            self.execution_options_widget.basis_combo.setCurrentIndex(0)
+        pulse=self.execution_options_widget.basis_combo.currentData()=='pulse'
+        if pulse:self.cmb_lu_precision.setCurrentIndex(self.cmb_lu_precision.findData('double'))
+        self.cmb_lu_precision.setEnabled(not busy and not experimental and not pulse and factor == 'dense')
         self.btn_advanced_settings.setEnabled(not busy)
         self.edit_quality_residual_max.setEnabled(enable_2d_quality_thresholds)
         self.edit_quality_condition_max.setEnabled(enable_2d_quality_thresholds)

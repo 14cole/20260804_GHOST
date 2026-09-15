@@ -1285,16 +1285,20 @@ def _estimate_memory_gb(
     if factorization == 'fmm':
         if requested_precision()!='double' or requested=='gpu':
             raise ValueError('FMM requires double precision and CPU execution.')
-        from ghost_backend.execution.options import option
-        from ghost_backend.compressed.runtime import storage_budget
-        # Conservative linear workspace allowance, plus the explicit near cap.
-        # Near assembly checks actual pair counts before allocating its matrices.
-        batch=min(batch,32)
         from ghost_backend.twod.fmm.memory import forecast
+        from ghost_backend.compressed.runtime import storage_budget
         plan=forecast(n,d,n_regions,batch,storage_budget(),resources)
-        peak=plan['peak_bytes']
         if dense_resources is not None:dense_resources['memory_estimate']=plan
-        return peak/1024**3
+        return plan['peak_bytes']/1024**3
+
+    if resources.get('discretization')=='pulse' and factorization!='compressed':
+        # P0 point testing stores no regional dense matrices. Assembly uses
+        # bounded source tiles; retain A alongside LU for residual checks.
+        peak=2*matrix+16*16*d*batch+(64+16*get_assembly_threads())*1024**2
+        if factorization in ('hierarchical','auto'):
+            from ghost_backend.linalg.hierarchical import factor_storage_budget
+            peak+=factor_storage_budget(matrix)
+        return (peak+count*4096)/1024**3
     if factorization == 'compressed':
         from ghost_backend.compressed.runtime import storage_budget
         from ghost_backend.linalg.refined_lu import requested_precision
@@ -1634,6 +1638,11 @@ def _dense_formulation_resources(
     selected formulation.
     """
 
+    from ghost_backend.execution.options import option
+    if option('discretization','galerkin')=='pulse':
+        from ghost_backend.twod.pulse.runtime import resources
+        return resources(mesh,infos,pol)
+
     nnodes = int(len(mesh.nodes))
     storage = {}
     regions = {
@@ -1706,6 +1715,10 @@ def _dense_formulation_resources(
         from ghost_backend.twod.fmm.galerkin import near_pairs
         from ghost_backend.twod.assembly.geometry_plan import AssemblyGeometry
         result['geometric_near_pairs']=2*near_pairs(AssemblyGeometry(mesh),float('inf'),count_only=True)-len(mesh.elements)
+    from ghost_backend.twod.fmm.runtime import enabled as fmm_enabled
+    if not storage.get('analytic_zero') and (not sample_compression or fmm_enabled()):
+        from ghost_backend.twod.fmm.memory import geometry_resources
+        result['fmm_geometry']=geometry_resources(mesh,infos)
     from ghost_backend.compressed.runtime import enabled as compressed_enabled
     if sample_compression and compressed_enabled() and not storage.get('analytic_zero'):
         from ghost_backend.compressed.memory import geometry_storage
@@ -2117,6 +2130,27 @@ def solve_monostatic_rcs_2d_single_polarization(
         junction_stats["linear_node_count"] = int(len(mesh.nodes))
         junction_stats["linear_element_count"] = int(len(mesh.elements))
 
+
+        from ghost_backend.execution.options import option
+        if option('discretization','galerkin')=='pulse':
+            from ghost_backend.twod.pulse.runtime import solve_fields as solve_pulse_fields
+            formulation_label='2D pulse midpoint collocation (piecewise-constant density)'
+            condition_diagnostics={} if compute_condition_number else None
+            rcs_lin_vec,amp_vec,pulse_residual=solve_pulse_fields(
+                mesh,coupled_infos,pol,k0,elevations_arr,condition_diagnostics)
+            rcs_db_vec=_rcs_db_from_sigma(rcs_lin_vec)
+            _consume_condition_estimate(cond_values,condition_diagnostics,formulation_label)
+            reused_matrix_solve_count+=len(elevations)
+            for idx,elev_deg in enumerate(elevations):
+                amp_val=complex(amp_vec[idx])
+                samples.append(dict(frequency_ghz=float(freq_ghz),theta_inc_deg=float(elev_deg),
+                    theta_scat_deg=float(elev_deg),rcs_linear=float(rcs_lin_vec[idx]),
+                    rcs_db=float(rcs_db_vec[idx]),rcs_amp_real=float(amp_val.real),
+                    rcs_amp_imag=float(amp_val.imag),rcs_amp_phase_deg=float(math.degrees(cmath.phase(amp_val))),
+                    linear_residual=float(pulse_residual)))
+                residual_values.append(float(pulse_residual));constraint_residual_values.append(0.)
+                done_steps+=1;emit_progress(f'Pulse solved {freq_ghz:g} GHz at {elev_deg:g} deg')
+            continue
 
         if _is_all_sheet(coupled_infos):
             formulation_label = (
@@ -2535,7 +2569,13 @@ def solve_monostatic_rcs_2d_single_polarization(
     }
 
     if metadata.get('compressed_factors'):metadata['solver_method']='compressed_cpu'
-    if metadata.get('fmm_factors'):metadata['solver_method']='galerkin_fmm_gmres'
+    if metadata.get('fmm_factors'):
+        metadata['solver_method']='pulse_fmm_gmres' if option('discretization','galerkin')=='pulse' else 'galerkin_fmm_gmres'
+    metadata['discretization']=option('discretization','galerkin')
+    if metadata['discretization']=='pulse':
+        metadata['basis']='piecewise_constant'
+        metadata['testing']='panel_midpoint_collocation'
+        metadata['pulse_pec_cfie']=option('pulse_pec_cfie',True)
     metadata["amplitude_version"] = RCS_AMPLITUDE_VERSION
     quality_gate = evaluate_quality_gate(metadata, thresholds=quality_thresholds)
     metadata["quality_gate"] = quality_gate
@@ -3938,6 +3978,10 @@ def compute_boundary_densities(
     densities. Returns element-center positions, layer density, panel normals,
     and the formulation used for a single-frequency, single-angle debug solve.
     """
+
+    from ghost_backend.execution.options import option
+    if option('discretization','galerkin')=='pulse':
+        raise ValueError('Pulse boundary-density export is not yet available; use the monostatic field solver.')
 
     def check_abort() -> 'None':
         if abort_event is not None and abort_event.is_set():

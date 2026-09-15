@@ -43,6 +43,12 @@ Settings**, which starts collapsed. Existing explicit saved settings are kept.
 See [automatic solver behavior and qualification](AUTOMATIC_SOLVER.md) and
 [saved execution profiles](RUN_PROFILES.md) for overrides and resource limits.
 
+Advanced Settings also offers **Pulse / midpoint collocation** under
+**Boundary discretization**. Pulse supports dense, compressed and FMM execution
+for 2-D monostatic PEC/impedance bodies and bulk dielectric interfaces.
+See [Pulse and FMM efficiency updates](PULSE_FMM_UPDATES.md) for controls,
+measurements, supported configurations and accuracy tradeoffs.
+
 [2D pipeline controls](TWOD_PIPELINE.md) describe automatic backend selection,
 optional local material meshing, faster geometry validation, and desktop
 frequency checkpoints with verified resume.

@@ -6,7 +6,7 @@ per-illumination iterations. Both desktop and execution-node scheduling use it.
 """
 import math
 
-MODEL = 'geometry_work_v2'
+MODEL = 'geometry_work_v3_pulse'
 BACKENDS = ('dense', 'compressed', 'fmm')
 
 
@@ -35,7 +35,7 @@ def fmm_eligibility(resources, mesh=None, infos=None):
                     return False, 'The material wavenumber is outside the qualified native FMM range.'
                 if max(8,math.ceil(abs(k)*longest/2)+4) > 64:
                     return False, 'The supplied mesh requires more than 64 FMM quadrature nodes per panel.'
-    return True, 'Supported Galerkin material equations.'
+    return True, 'Supported 2-D material equations.'
 
 
 def relative_cost(resources, n_angles, mode):
@@ -43,7 +43,11 @@ def relative_cost(resources, n_angles, mode):
     angles=max(1,int(n_angles)); kernels=max(1.,resources.get('operator_matrices',3)/3.)
     if resources.get('analytic_zero'):
         return .001
-    dense=.025 + 7e-7*n*n*kernels + 4e-12*d**3 + 2e-10*d*d*angles
+    assembly=7e-7*n*n*kernels
+    # Integrated P0 timings include accurate near integrals and routing; kernel
+    # sample-count ratios alone substantially overpredict its assembly gain.
+    if resources.get('discretization')=='pulse':assembly*=.75
+    dense=.025 + assembly + 4e-12*d**3 + 2e-10*d*d*angles
     if mode == 'dense':
         return dense
     if mode == 'compressed':

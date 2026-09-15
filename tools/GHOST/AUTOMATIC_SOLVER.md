@@ -39,9 +39,9 @@ time including planning and retries.
   admission, supporting the existing qualified PEC, IBC, dielectric, coated,
   layered, mixed-region, and impedance-sheet routes.
 - Persistent native geometry plans and work buffers reused at fixed frequency.
-- Recycled LGMRES angle solves with bounded augmentation, original-equation
-  residual verification, and stagnation clearing. An advanced zero-recycling
-  setting selects ordinary GMRES.
+- Formulation-aware GMRES/LGMRES angle solves with bounded augmentation,
+  incremental incident-basis reuse, original-equation residual verification,
+  and stagnation clearing. Explicit recycling overrides remain available.
 - Bounded physical angle batches and native density workspaces, automatic
   backend selection shared by GUI/API/HPC, and recorded admission/retry reasons.
 - Headless qualification tests, native source/build provenance, and an optional
@@ -50,8 +50,11 @@ time including planning and retries.
 Existing restrictions on sheet/material coupling remain. Nonzero thin
 dielectric layer approximations and bistatic FMM are excluded. The separate
 smooth-surface Nystrom prototype is a research API; Automatic never substitutes
-it for arbitrary imported geometry. Closed pure-PEC TM combined-field FMM is
-an advanced opt-in, not a general replacement for other material equations.
+it for arbitrary imported geometry. Closed pure-PEC TM FMM now selects the
+qualified outgoing combined field by default; explicit saved overrides remain
+in force. Other material equations keep their formulations. The optional Pulse
+discretization and the FMM changes are described in
+[Pulse and FMM efficiency updates](PULSE_FMM_UPDATES.md).
 
 Mesh certification compares fields on base and refined meshes. It does not
 certify geometric fidelity to a curved object, and solver residuals do not

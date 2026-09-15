@@ -1,6 +1,5 @@
 """Equilibrated sparse-preconditioned GMRES with explicit residual rejection."""
 import numpy as np
-from scipy.linalg import qr
 from scipy.sparse import diags
 from scipy.sparse.linalg import LinearOperator, spilu, gmres, lgmres, onenormest
 from ghost_backend.execution.options import option
@@ -21,11 +20,17 @@ class FMMFactor:
         self.tolerance=option('fmm_solver_tolerance',1e-9)
         self.restart=option('fmm_restart',80)
         self.maxiter=option('fmm_max_iterations',800)
-        self.recycle_limit=option('fmm_recycle_vectors',12)
+        requested_recycle=option('fmm_recycle_vectors','auto')
+        self.recycle_limit=(getattr(matrix,'preferred_recycle_vectors',12)
+                            if requested_recycle=='auto' else requested_recycle)
         self.recycled=[]
         self.coordinates=kwargs.get('coordinates')
         self.coarse_attempted=False
         self.coarse_trial=None
+        from ghost_backend.twod.fmm.memory import rhs_basis_capacity
+        self.rhs_basis_capacity=rhs_basis_capacity(len(matrix))
+        self.rhs_q=np.empty((len(matrix),0),complex)
+        self.rhs_x=np.empty((len(matrix),0),complex)
         near=matrix.sparse_near()
         self.row=1/np.maximum(abs(near).max(axis=1).toarray().ravel(),1e-300)
         scaled=diags(self.row)@near
@@ -50,6 +55,8 @@ class FMMFactor:
         self.details.update(solver_tolerance=self.tolerance,iterations=[],condition_iterations=0,
             iterative_method='lgmres' if self.recycle_limit else 'gmres',
             iteration_measure='operator_applications',recycle_vectors_limit=self.recycle_limit,recycle_resets=0,
+            recycle_vectors_requested=requested_recycle,
+            rhs_basis_capacity=self.rhs_basis_capacity,rhs_basis_columns=0,rhs_basis_reused_batches=0,
             preconditioner='equilibrated_sparse_ilu',preconditioner_nnz=int(self.lu.L.nnz+self.lu.U.nnz),
             preconditioner_storage_bytes=int(20*(self.lu.L.nnz+self.lu.U.nnz)+8*(n+1)),
             input_rhs_columns=0,solved_rhs_columns=0,max_relative_residual=0.)
@@ -180,15 +187,26 @@ class FMMFactor:
         scaled=self.row[:,None]*b
         # Compress illuminations in the equation scaling used by GMRES. Every
         # recovered column is checked in the original, unscaled equation below.
-        recovery=None;to_solve=scaled
+        recovery=None;to_solve=scaled;cached=None;basis=None
         compression=option('rhs_compression','auto')
-        if compression!='off' and b.shape[1]>=(2 if compression=='on' else 16) and np.any(scaled):
-            q,r,piv=qr(scaled,mode='economic',pivoting=True,check_finite=False)
-            tail=np.sqrt(np.cumsum(np.sum(abs(r)**2,axis=1)[::-1])[::-1])
-            rank=max(1,int(np.count_nonzero(tail>1e-12*np.linalg.norm(scaled))))
-            if rank<.7*b.shape[1]:
-                to_solve=q[:,:rank]
-                recovery=np.empty((rank,b.shape[1]),complex);recovery[:,piv]=r[:rank]
+        existing=self.rhs_q.shape[1]
+        if compression!='off' and (existing or b.shape[1]>=(2 if compression=='on' else 16)) and np.any(scaled):
+            from ghost_backend.linalg.sweep import _qr_basis
+            threshold=min(1e-12,self.tolerance*.01)*np.linalg.norm(scaled)
+            cached=self.rhs_q.conj().T@scaled
+            remainder=scaled-self.rhs_q@cached
+            correction=self.rhs_q.conj().T@remainder
+            cached+=correction;remainder-=self.rhs_q@correction
+            limit=min(self.rhs_basis_capacity-existing,int(np.ceil(.7*b.shape[1]))-1)
+            basis,recovery=_qr_basis(remainder,threshold,max_rank=limit)
+            if basis is None and existing:
+                # The old angular span is full or no longer useful. Bound the
+                # cache before constructing a replacement for this batch.
+                self.rhs_q=self.rhs_q[:,:0].copy();self.rhs_x=self.rhs_x[:,:0].copy()
+                existing=0;cached=np.empty((0,b.shape[1]),complex)
+                basis,recovery=_qr_basis(scaled,threshold,
+                    max_rank=min(self.rhs_basis_capacity,int(np.ceil(.7*b.shape[1]))-1))
+            if basis is not None:to_solve=basis
         solutions=[]
         for j,column in enumerate(to_solve.T):
             remaining=to_solve.shape[1]-j-1
@@ -203,8 +221,8 @@ class FMMFactor:
                     not self.coarse_attempted and len(self.a)>=128 and
                     remaining>=8 and self.details['iterations'][-1]>=24):
                 self._coarse_correction()
-        x=np.column_stack(solutions)
-        if recovery is not None:x=x@recovery
+        solved=np.column_stack(solutions) if solutions else np.empty((len(self.a),0),complex)
+        x=(self.rhs_x@cached+solved@recovery) if recovery is not None else solved
         x=self.col[:,None]*x
         residual=self.a@x-b
         norms=np.linalg.norm(b,axis=0)
@@ -218,6 +236,12 @@ class FMMFactor:
         if not np.all(np.isfinite(relative)) or np.max(relative)>self.tolerance:
             raise FMMConvergenceError('FMM solution failed the unscaled original-RHS residual check.')
         self.relative_residual=relative
+        if recovery is not None:
+            self.rhs_q=np.column_stack((self.rhs_q,basis))
+            self.rhs_x=np.column_stack((self.rhs_x,solved))
+            self.details['rhs_basis_reused_batches']+=int(existing>0)
+        self.details['rhs_basis_columns']=self.rhs_q.shape[1]
+        self.details['rhs_basis_storage_bytes']=self.rhs_q.nbytes+self.rhs_x.nbytes
         self.details['input_rhs_columns']+=b.shape[1]
         self.details['solved_rhs_columns']+=to_solve.shape[1]
         self.details['max_relative_residual']=max(self.details['max_relative_residual'],float(relative.max()))
